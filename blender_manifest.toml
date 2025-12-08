@@ -1,0 +1,9 @@
+schema_version = "1.0.0"
+id = "molymod_atom_builder"
+version = "5.0.0"
+name = "Molymod Atom Builder"
+tagline = "Build modular molecules from PDB and CIF"
+maintainer = "Giorgio Luciano"
+type = "add-on"
+license = ["SPDX:GPL-3.0-or-later"]
+blender_version_min = "4.2.0"
