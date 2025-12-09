@@ -22,9 +22,6 @@ customizable atom geometries, and advanced rendering options.
 - 3D printing of molecular structures
 - Publication figures for chemistry and materials papers
 
-
-
-
 ## Requirements
 
 - **Blender 5.0+** (or 4.2+, depending on your actual minimum)
@@ -124,7 +121,8 @@ Open a terminal/command prompt and run:
 
 - Restart Blender after installation
 - Check that the addon folder structure is correct (should have `__init__.py`)
-
+  
+### see also https://www.youtube.com/@jojo75cg
 ---
 ```
 
