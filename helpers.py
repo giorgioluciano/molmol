@@ -179,15 +179,13 @@ def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
         return inst
     print("[CAP] Unknown template kind:", kind)
     return None
-    
-
-
 
 def parse_atoms_bonds(path, scale):
     """Parse coordinates and bonds from PDB or CIF file using ASE.
+    For PDB files, reads bonds directly from CONECT records (accurate for organic molecules).
+    Falls back to ASE NeighborList for CIF and other formats.
     Returns: atoms, bonds, coords, types."""
-    atoms, bonds, coords, types = [], [], {}, {}
-
+    atoms_list, bonds, coords, types = [], [], {}, {}
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext == ".cif":
@@ -195,23 +193,38 @@ def parse_atoms_bonds(path, scale):
         else:
             molecule = ase_read(path)
     except StopIteration:
-        raise ValueError(f"Il file {path} non contiene strutture leggibili o è vuoto")
-
+        raise ValueError(f"Il file {path} non contiene strutture leggibili o e' vuoto")
     for i, atom in enumerate(molecule):
-        idx = i+1  # 1-based indexing
+        idx = i + 1  # 1-based indexing
         sym = atom.symbol
         pos = Vector(atom.position) * scale
-        atoms.append((idx, sym, pos))
+        atoms_list.append((idx, sym, pos))
         coords[idx] = pos
         types[idx] = sym
-
-    for (i1, i2) in get_bonds(molecule):
-        if i1 < i2:
-            bonds.append((i1+1, i2+1))  # Convert to 1-based
-        else:
-            bonds.append((i2+1, i1+1))
-
-    return atoms, bonds, coords, types
+    # FIX: per PDB usa le CONECT invece della NeighborList (evita legami fantasma)
+    if ext in (".pdb", ".ent"):
+        bond_set = set()
+        with open(path, "r") as f:
+            for line in f:
+                if line.startswith("CONECT"):
+                    fields = line.split()
+                    if len(fields) < 3:
+                        continue
+                    origin = int(fields[1])
+                    for target in fields[2:]:
+                        t = int(target)
+                        pair = (min(origin, t), max(origin, t))
+                        bond_set.add(pair)
+        for (i1, i2) in bond_set:
+            bonds.append((i1, i2))  # gia' 1-based come nel PDB
+    else:
+        # CIF e altri formati: usa NeighborList ASE
+        for (i1, i2) in get_bonds(molecule):
+            if i1 < i2:
+                bonds.append((i1 + 1, i2 + 1))
+            else:
+                bonds.append((i2 + 1, i1 + 1))
+    return atoms_list, bonds, coords, types
 
 def axis_vec(label: str) -> Vector:
     return {
@@ -241,43 +254,48 @@ def _load_cap_template(P):
         return ("COLLECTION", coll)
     except Exception as e_col:
         print(f"[CAP] Template '{name}' not found as Object or Collection: {e_col}")
-        return None
+    return None
 
 def _get_or_make_material(name, rgba):
     mat = bpy.data.materials.get(name)
     if not mat:
         mat = bpy.data.materials.new(name)
         mat.use_nodes = True
-    nt = mat.node_tree
-    bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
-    if bsdf:
-        bsdf.inputs["Base Color"].default_value = (rgba[0], rgba[1], rgba[2], 1)
-        bsdf.inputs["Roughness"].default_value = 0.45
+        nt = mat.node_tree
+        bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if bsdf:
+            bsdf.inputs["Base Color"].default_value = (rgba[0], rgba[1], rgba[2], 1)
+            bsdf.inputs["Roughness"].default_value = 0.45
     return mat
 
 def _get_or_make_cap_material(P):
-    # Se il nome è uno degli elementi comuni, usa la palette, altrimenti un grigio neutro
     if P.cap_mat_name in ["H","C","N","O","S","P","F","Cl","Br","I"]:
         col = getattr(P, f"col_{P.cap_mat_name}", (0.85, 0.85, 0.85, 1.0))
         return _get_or_make_material(f"Mol_{P.cap_mat_name}", col)
     else:
         return _get_or_make_material(P.cap_mat_name, (0.85, 0.85, 0.85, 1.0))
 
-
 def cap_quaternion(dirn: Vector, forward_axis: str, roll_deg: float) -> Quaternion:
     forward_local = axis_vec(forward_axis)
-    q_pre   = forward_local.rotation_difference(Vector((0,0,1)))
+    q_pre = forward_local.rotation_difference(Vector((0,0,1)))
     q_align = Vector((0,0,1)).rotation_difference(dirn.normalized())
-    q_roll  = Quaternion(dirn.normalized(), radians(roll_deg))
+    q_roll = Quaternion(dirn.normalized(), radians(roll_deg))
     return q_roll @ (q_align @ q_pre)
 
 def choose_geometry_key(element: str, nn: int):
+    """Choose geometry key based on element and neighbor count.
+    FIX: N/P/As/Sb con nn==3 ora restituisce Atom_sp2 (planare, aromatico).
+    Per ammine sp3 quaternarie (nn==4) restituisce Atom_sp3."""
     e = element
     if nn <= 1 and (e == "H" or e in HALOGENS):
         return "Atom_sp"
     if nn == 2 and e in {"O", "S", "Se", "Te"}:
         return "Atom_bent"
+    # FIX: N con 3 legami e' sp2 (aromatico, es. carbazolo, piridina, pirrolo)
+    # Per N sp3 alifatico (ammina) il file PDB tipicamente ha nn=4 con H espliciti
     if e in {"N", "P", "As", "Sb"} and nn == 3:
+        return "Atom_sp2"
+    if e in {"N", "P", "As", "Sb"} and nn == 4:
         return "Atom_sp3"
     if e == "S" and nn >= 6:
         return "Atom_sp3d2"
@@ -286,10 +304,10 @@ def choose_geometry_key(element: str, nn: int):
         if nn == 3: return "Atom_sp2"
         if nn <= 2: return "Atom_sp"
     if nn >= 6: return "Atom_sp3d2"
-    if nn == 5:  return "Atom_sp3d2"
-    if nn == 4:  return "Atom_sp3"
-    if nn == 3:  return "Atom_sp2"
+    if nn == 5: return "Atom_sp3d2"
+    if nn == 4: return "Atom_sp3"
+    if nn == 3: return "Atom_sp2"
     return "Atom_sp"
 
-# Alias per compatibilità col vecchio naming
+# Alias per compatibilita' col vecchio naming
 _axis_vec = axis_vec
