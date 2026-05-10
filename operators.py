@@ -4,15 +4,49 @@ from mathutils import Vector, Matrix, Quaternion
 
 from .helpers import (
     GEN_COLLECTIONS, HALOGENS,
-    BOND_SINGLE, BOND_DOUBLE, BOND_TRIPLE,
     abspath, ensure_hidden_bucket, unlink_collection_everywhere,
     append_collection, append_object, load_hole_dirs,
     kabsch_rotation, align_one_vector, hungarian_assign,
-    parse_atoms_bonds, choose_geometry_key, axis_vec, _load_cap_template,
-    _get_or_make_cap_material, _add_cap_at, double_bond_offsets
+    parse_atoms_bonds, choose_geometry_key, axis_vec,
+    _load_cap_template, _get_or_make_cap_material, _add_cap_at
 )
 
-# Main Operator: Build molecule
+
+def _make_bezier_bond(p0, p1, p2, p3, radius, name, context):
+    """Crea un legame come curva Bezier cubica con bevel (tubo 3D).
+    p0, p3 = basi dei cap (punti di ancoraggio)
+    p1, p2 = maniglie (tangenti ai fori)
+    radius  = raggio del tubo
+    """
+    curve_data = bpy.data.curves.new(name, type='CURVE')
+    curve_data.dimensions = '3D'
+    curve_data.resolution_u = 12
+    curve_data.bevel_depth = radius
+    curve_data.bevel_resolution = 4
+    curve_data.use_fill_caps = True
+
+    spline = curve_data.splines.new('BEZIER')
+    spline.bezier_points.add(1)  # 2 punti totali
+
+    bp0 = spline.bezier_points[0]
+    bp0.co             = p0
+    bp0.handle_left    = p0  # handle non usato (inizio)
+    bp0.handle_right   = p1  # maniglia di uscita
+    bp0.handle_left_type  = 'FREE'
+    bp0.handle_right_type = 'FREE'
+
+    bp1 = spline.bezier_points[1]
+    bp1.co             = p3
+    bp1.handle_left    = p2  # maniglia di entrata
+    bp1.handle_right   = p3  # handle non usato (fine)
+    bp1.handle_left_type  = 'FREE'
+    bp1.handle_right_type = 'FREE'
+
+    obj = bpy.data.objects.new(name, curve_data)
+    context.scene.collection.objects.link(obj)
+    return obj
+
+
 class MOLYMOD_OT_Build(bpy.types.Operator):
     bl_idname = "molymod.build"
     bl_label = "Build Molecule from File"
@@ -20,7 +54,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
     def execute(self, context):
         P = context.scene.molymod_settings
-        lib = abspath(P.lib_path)
+        lib     = abspath(P.lib_path)
         molfile = abspath(P.molecule_path)
         if not os.path.isfile(lib):
             self.report({'ERROR'}, f"Library .blend not found: {lib}")
@@ -33,42 +67,45 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 if o.name.startswith(("mol_", "bond_", "bond_cap", "DEBUG_")):
                     bpy.data.objects.remove(o, do_unlink=True)
 
-        # Load all atom type template collections
         for key in GEN_COLLECTIONS:
             try:
                 append_collection(P.lib_path, key)
             except Exception as e:
                 print(f"[Molymod] '{key}' not found (ok if unused). {e}")
 
-        # parse_atoms_bonds ora restituisce anche bond_orders {(i,j): ordine}
         atoms, bonds, coords, types, bond_orders = parse_atoms_bonds(molfile, P.scale)
 
-        # Optionally apply compact factor to coordinates
         if abs(P.compact_factor - 1.0) > 1e-9:
-            for k in coords: coords[k] = coords[k] * P.compact_factor
+            for k in coords:
+                coords[k] = coords[k] * P.compact_factor
 
-        # Preload hole vectors for each atom type collection
-        hole_cache = {}
-        placed = {}
+        hole_cache    = {}
+        placed        = {}
+        # Dizionario che memorizza la direzione del foro usata per ogni coppia (atomo, vicino)
+        # {(idx_atomo, idx_vicino): Vector} — direzione normalizzata dal foro verso il vicino
+        hole_dir_used = {}
 
-        # Instantiate atoms
+        # --- Posizionamento atomi ---
         for idx, sym, _pos_unused in atoms:
-            pos = coords[idx]
+            pos    = coords[idx]
             neighs = [t for s, t in bonds if s == idx] + [s for s, t in bonds if t == idx]
-            nn = len(neighs)
-            key = choose_geometry_key(sym, nn)
+            nn     = len(neighs)
+            key    = choose_geometry_key(sym, nn)
             if key not in hole_cache:
                 hole_cache[key] = load_hole_dirs(P.lib_path, key)
             hole_vecs = hole_cache[key]
+
             bond_dirs = []
             for n in neighs[:max(1, len(hole_vecs))]:
                 v = coords[n] - pos
                 if v.length > 1e-9:
                     bond_dirs.append(v.normalized())
-            bpy.ops.object.collection_instance_add(collection=key, location=(0, 0, 0))
-            inst = context.object; inst.name = f"mol_{sym}_{idx}"
 
-            # Orientation logic
+            bpy.ops.object.collection_instance_add(collection=key, location=(0, 0, 0))
+            inst = context.object
+            inst.name = f"mol_{sym}_{idx}"
+
+            # Orientamento
             if nn == 1 and (sym == "H" or sym in HALOGENS) and len(bond_dirs) == 1:
                 b = bond_dirs[0]
                 forward_local = axis_vec(P.H_forward_axis)
@@ -76,20 +113,36 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 q_roll  = Quaternion(b, radians(P.H_roll_deg))
                 inst.matrix_world = (q_roll @ q_align).to_matrix().to_4x4()
             elif len(hole_vecs) >= 2 and len(bond_dirs) >= 2:
-                cost = [[1.0 - max(-1.0, min(1.0, h.dot(b))) for b in bond_dirs] for h in hole_vecs]
+                cost   = [[1.0 - max(-1.0, min(1.0, h.dot(b))) for b in bond_dirs] for h in hole_vecs]
                 rows, cols = hungarian_assign(cost)
                 from_v = [hole_vecs[i] for i in rows]
                 to_v   = [bond_dirs[j] for j in cols]
-                inst.matrix_world = kabsch_rotation(from_v, to_v)
+                R = kabsch_rotation(from_v, to_v)
+                inst.matrix_world = R
+                # Memorizza la corrispondenza foro->vicino dopo la rotazione
+                for r, c in zip(rows, cols):
+                    n_idx = neighs[c]
+                    rotated_hole = (R.to_3x3() @ hole_vecs[r]).normalized()
+                    hole_dir_used[(idx, n_idx)] = rotated_hole
             elif len(bond_dirs) == 1 and len(hole_vecs) >= 1:
                 b = bond_dirs[0]
                 h = max(hole_vecs, key=lambda v: v.dot(b))
-                if h.dot(b) < 0.0: h = -h
-                inst.matrix_world = align_one_vector(h, b)
+                if h.dot(b) < 0.0:
+                    h = -h
+                R = align_one_vector(h, b)
+                inst.matrix_world = R
+                n_idx = neighs[0]
+                rotated_hole = (R.to_3x3() @ h).normalized()
+                hole_dir_used[(idx, n_idx)] = rotated_hole
             elif len(hole_vecs) >= 1 and len(bond_dirs) >= 1:
-                inst.matrix_world = align_one_vector(hole_vecs[0], bond_dirs[0])
+                R = align_one_vector(hole_vecs[0], bond_dirs[0])
+                inst.matrix_world = R
+                n_idx = neighs[0]
+                rotated_hole = (R.to_3x3() @ hole_vecs[0]).normalized()
+                hole_dir_used[(idx, n_idx)] = rotated_hole
             else:
                 inst.matrix_world = Matrix.Identity(4)
+
             inst.location = pos
 
             bpy.ops.object.select_all(action='DESELECT')
@@ -115,72 +168,60 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             else:
                 placed[idx] = inst
 
-        # Cap template/material
+        # Cap template/material (opzionale, usato solo per i caps alle estremita')
         cap_template = None
-        cap_mat = None
+        cap_mat      = None
         if P.use_caps:
             cap_template = _load_cap_template(P)
-            cap_mat = _get_or_make_cap_material(P)
-            if P.debug_mode and P.use_caps:
-                print(f"[CAP] Using template: {cap_template}")
+            cap_mat      = _get_or_make_cap_material(P)
 
-        # Draw bonds - con supporto doppi legami
         bond_r = P.bond_radius * P.scale / 3.0
+        tf     = P.bond_tangent_factor  # 0..0.49, default 0.35
+
+        # --- Disegno legami con spline Bezier ---
         for s, t in bonds:
-            if s in placed and t in placed and placed[s] and placed[t]:
-                p1, p2 = coords[s], coords[t]
-                vec = p2 - p1
-                if vec.length <= 1e-9: continue
-                dirn = vec.normalized()
-                offA = max(0.0, P.bond_gap_each_side) + P.bond_start_offset
-                offB = max(0.0, P.bond_gap_each_side) + P.bond_end_offset
-                a = p1 + dirn * offA
-                b = p2 - dirn * offB
-                seg = b - a
-                Leff = max(0.01, seg.length * P.bond_length_factor)
-                mid  = a + seg * 0.5
-                rot  = dirn.to_track_quat('Z', 'Y').to_euler()
+            if s not in placed or t not in placed:
+                continue
+            if not placed[s] or not placed[t]:
+                continue
 
-                pair = (min(s, t), max(s, t))
-                order = bond_orders.get(pair, BOND_SINGLE)
+            pos_s = coords[s]
+            pos_t = coords[t]
+            vec   = pos_t - pos_s
+            dist  = vec.length
+            if dist <= 1e-9:
+                continue
 
-                if order >= BOND_DOUBLE:
-                    # Due cilindri paralleli piu' sottili (raggio ridotto)
-                    r_double = bond_r * 0.65
-                    off_a, off_b = double_bond_offsets(p1, p2)
-                    for off in (off_a, off_b):
-                        mid_off = mid + off
-                        bpy.ops.mesh.primitive_cylinder_add(
-                            vertices=P.bond_vertices,
-                            radius=r_double,
-                            depth=Leff,
-                            location=mid_off,
-                            rotation=rot
-                        )
-                        cyl = context.object
-                        cyl.name = f"bond_{s}_{t}"
-                        if P.use_caps:
-                            a_cap = (a + off) + dirn * (P.cap_offset + P.cap_start_offset)
-                            b_cap = (b + off) - dirn * (P.cap_offset + P.cap_end_offset)
-                            _add_cap_at(a_cap,  dirn, P, cap_mat, cap_template)
-                            _add_cap_at(b_cap, -dirn, P, cap_mat, cap_template)
-                else:
-                    # Legame singolo: un solo cilindro (comportamento originale)
-                    bpy.ops.mesh.primitive_cylinder_add(
-                        vertices=P.bond_vertices,
-                        radius=bond_r,
-                        depth=Leff,
-                        location=mid,
-                        rotation=rot
-                    )
-                    cyl = context.object; cyl.name = f"bond_{s}_{t}"
-                    if P.use_caps:
-                        a_cap = a + dirn * (P.cap_offset + P.cap_start_offset)
-                        b_cap = b - dirn * (P.cap_offset + P.cap_end_offset)
-                        _add_cap_at(a_cap,  dirn, P, cap_mat, cap_template)
-                        _add_cap_at(b_cap, -dirn, P, cap_mat, cap_template)
+            # Offset di gap dal centro dell'atomo
+            offA  = max(0.0, P.bond_gap_each_side) + P.bond_start_offset
+            offB  = max(0.0, P.bond_gap_each_side) + P.bond_end_offset
+            dirn  = vec.normalized()
+            p0    = pos_s + dirn * offA   # base cap lato s
+            p3    = pos_t - dirn * offB   # base cap lato t
 
-        self.report({'INFO'}, "Molymod build complete (double bonds enabled) ✅")
+            # Direzione dei fori (gia' ruotata con l'atomo)
+            # Se non disponibile, fallback alla direzione del legame
+            dir_s = hole_dir_used.get((s, t), dirn)
+            dir_t = hole_dir_used.get((t, s), -dirn)
+
+            # tlen: lunghezza tangente = frazione della distanza effettiva p0-p3
+            eff_dist = (p3 - p0).length
+            tlen     = eff_dist * tf
+
+            # I 4 punti della Bezier
+            # P1: maniglia di uscita da p0 nella direzione del foro di s
+            # P2: maniglia di entrata su p3 nella direzione del foro di t (che punta VERSO s)
+            p1 = p0 + dir_s * tlen
+            p2 = p3 + dir_t * tlen   # dir_t punta verso s, quindi + da p3 va verso s
+
+            bond_name = f"bond_{s}_{t}"
+            _make_bezier_bond(p0, p1, p2, p3, bond_r, bond_name, context)
+
+            if P.use_caps and cap_mat:
+                _add_cap_at(p0,  dir_s,  P, cap_mat, cap_template)
+                _add_cap_at(p3,  dir_t,  P, cap_mat, cap_template)
+
+        self.report({'INFO'}, "Molymod build complete (Bezier bonds) ✅")
         return {'FINISHED'}
 
 
@@ -190,14 +231,15 @@ class MOLYMOD_OT_ValidateLibrary(bpy.types.Operator):
     bl_options = {'REGISTER',}
 
     def execute(self, context):
-        P = context.scene.molymod_settings
+        P   = context.scene.molymod_settings
         lib = abspath(P.lib_path)
         if not os.path.isfile(lib):
             self.report({'ERROR'}, f"Library .blend not found: {lib}")
             return {'CANCELLED'}
         missing = []
         with bpy.data.libraries.load(lib, link=False) as (src, dst):
-            src_colls = set(src.collections); src_objs = set(src.objects)
+            src_colls = set(src.collections)
+            src_objs  = set(src.objects)
         for ck in GEN_COLLECTIONS:
             if ck not in src_colls:
                 missing.append(f"[Collection] {ck}")
