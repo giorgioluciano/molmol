@@ -2,15 +2,15 @@ import bpy, os
 from math import radians
 from mathutils import Vector, Matrix, Quaternion
 
-
 from .helpers import (
     GEN_COLLECTIONS, HALOGENS,
+    BOND_SINGLE, BOND_DOUBLE, BOND_TRIPLE,
     abspath, ensure_hidden_bucket, unlink_collection_everywhere,
     append_collection, append_object, load_hole_dirs,
     kabsch_rotation, align_one_vector, hungarian_assign,
-    parse_atoms_bonds, choose_geometry_key,axis_vec,  _load_cap_template,
-    _get_or_make_cap_material,_add_cap_at )# ASE-driven parser: supports CIF/PDB with bond inference)
-# You may add additional helpers as needed.
+    parse_atoms_bonds, choose_geometry_key, axis_vec, _load_cap_template,
+    _get_or_make_cap_material, _add_cap_at, double_bond_offsets
+)
 
 # Main Operator: Build molecule
 class MOLYMOD_OT_Build(bpy.types.Operator):
@@ -40,8 +40,8 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             except Exception as e:
                 print(f"[Molymod] '{key}' not found (ok if unused). {e}")
 
-        # Use ASE parser to get atoms, bonds, coords, types (works for PDB/CIF and more)
-        atoms, bonds, coords, types = parse_atoms_bonds(molfile, P.scale)
+        # parse_atoms_bonds ora restituisce anche bond_orders {(i,j): ordine}
+        atoms, bonds, coords, types, bond_orders = parse_atoms_bonds(molfile, P.scale)
 
         # Optionally apply compact factor to coordinates
         if abs(P.compact_factor - 1.0) > 1e-9:
@@ -54,7 +54,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         # Instantiate atoms
         for idx, sym, _pos_unused in atoms:
             pos = coords[idx]
-            # List of neighbors (bonded atom indices)
             neighs = [t for s, t in bonds if s == idx] + [s for s, t in bonds if t == idx]
             nn = len(neighs)
             key = choose_geometry_key(sym, nn)
@@ -69,7 +68,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             bpy.ops.object.collection_instance_add(collection=key, location=(0, 0, 0))
             inst = context.object; inst.name = f"mol_{sym}_{idx}"
 
-            # Orientation logic (unchanged from working script)
+            # Orientation logic
             if nn == 1 and (sym == "H" or sym in HALOGENS) and len(bond_dirs) == 1:
                 b = bond_dirs[0]
                 forward_local = axis_vec(P.H_forward_axis)
@@ -109,22 +108,24 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             if new_objs:
                 for o in new_objs:
                     o.select_set(False)
-                try: bpy.data.objects.remove(inst, do_unlink=True)
+                try:
+                    bpy.data.objects.remove(inst, do_unlink=True)
                 except: pass
                 placed[idx] = new_objs[0]
             else:
                 placed[idx] = inst
 
-        # Optional cap template/material logic, as before
+        # Cap template/material
         cap_template = None
         cap_mat = None
         if P.use_caps:
             cap_template = _load_cap_template(P)
             cap_mat = _get_or_make_cap_material(P)
-        if P.debug_mode and P.use_caps:
-            print(f"[CAP] Using template: {cap_template}")
+            if P.debug_mode and P.use_caps:
+                print(f"[CAP] Using template: {cap_template}")
 
-        # Draw bonds
+        # Draw bonds - con supporto doppi legami
+        bond_r = P.bond_radius * P.scale / 3.0
         for s, t in bonds:
             if s in placed and t in placed and placed[s] and placed[t]:
                 p1, p2 = coords[s], coords[t]
@@ -137,32 +138,57 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 b = p2 - dirn * offB
                 seg = b - a
                 Leff = max(0.01, seg.length * P.bond_length_factor)
-                mid = a + seg * 0.5
-                rot = dirn.to_track_quat('Z','Y').to_euler()
-                bpy.ops.mesh.primitive_cylinder_add(
-                    vertices=P.bond_vertices,
-                    radius=P.bond_radius * P.scale / 3.0,
-                    depth=Leff,
-                    location=mid,
-                    rotation=rot
-                )
-                cyl = context.object; cyl.name = f"bond_{s}_{t}"
-                # Material can be handled directly (no palette logic)
-                # Add caps if enabled
-                if P.use_caps:
-                    a_cap = a + dirn * (P.cap_offset + P.cap_start_offset)
-                    b_cap = b - dirn * (P.cap_offset + P.cap_end_offset)
-                    _add_cap_at(a_cap,  dirn,  P, cap_mat, cap_template)
-                    _add_cap_at(b_cap, -dirn,  P, cap_mat, cap_template)
+                mid  = a + seg * 0.5
+                rot  = dirn.to_track_quat('Z', 'Y').to_euler()
 
-        self.report({'INFO'}, "Molymod build complete ✅")
+                pair = (min(s, t), max(s, t))
+                order = bond_orders.get(pair, BOND_SINGLE)
+
+                if order >= BOND_DOUBLE:
+                    # Due cilindri paralleli piu' sottili (raggio ridotto)
+                    r_double = bond_r * 0.65
+                    off_a, off_b = double_bond_offsets(p1, p2)
+                    for off in (off_a, off_b):
+                        mid_off = mid + off
+                        bpy.ops.mesh.primitive_cylinder_add(
+                            vertices=P.bond_vertices,
+                            radius=r_double,
+                            depth=Leff,
+                            location=mid_off,
+                            rotation=rot
+                        )
+                        cyl = context.object
+                        cyl.name = f"bond_{s}_{t}"
+                        if P.use_caps:
+                            a_cap = (a + off) + dirn * (P.cap_offset + P.cap_start_offset)
+                            b_cap = (b + off) - dirn * (P.cap_offset + P.cap_end_offset)
+                            _add_cap_at(a_cap,  dirn, P, cap_mat, cap_template)
+                            _add_cap_at(b_cap, -dirn, P, cap_mat, cap_template)
+                else:
+                    # Legame singolo: un solo cilindro (comportamento originale)
+                    bpy.ops.mesh.primitive_cylinder_add(
+                        vertices=P.bond_vertices,
+                        radius=bond_r,
+                        depth=Leff,
+                        location=mid,
+                        rotation=rot
+                    )
+                    cyl = context.object; cyl.name = f"bond_{s}_{t}"
+                    if P.use_caps:
+                        a_cap = a + dirn * (P.cap_offset + P.cap_start_offset)
+                        b_cap = b - dirn * (P.cap_offset + P.cap_end_offset)
+                        _add_cap_at(a_cap,  dirn, P, cap_mat, cap_template)
+                        _add_cap_at(b_cap, -dirn, P, cap_mat, cap_template)
+
+        self.report({'INFO'}, "Molymod build complete (double bonds enabled) ✅")
         return {'FINISHED'}
 
-# Other operators, unchanged
+
 class MOLYMOD_OT_ValidateLibrary(bpy.types.Operator):
     bl_idname = "molymod.validate_library"
     bl_label = "Validate Library"
     bl_options = {'REGISTER',}
+
     def execute(self, context):
         P = context.scene.molymod_settings
         lib = abspath(P.lib_path)
@@ -173,7 +199,8 @@ class MOLYMOD_OT_ValidateLibrary(bpy.types.Operator):
         with bpy.data.libraries.load(lib, link=False) as (src, dst):
             src_colls = set(src.collections); src_objs = set(src.objects)
         for ck in GEN_COLLECTIONS:
-            if ck not in src_colls: missing.append(f"[Collection] {ck}")
+            if ck not in src_colls:
+                missing.append(f"[Collection] {ck}")
         for ck in GEN_COLLECTIONS:
             if not any(name.startswith(f"{ck}_hole") for name in src_objs):
                 missing.append(f"[Holes] {ck}_hole#")
@@ -182,6 +209,7 @@ class MOLYMOD_OT_ValidateLibrary(bpy.types.Operator):
         self.report({'INFO'}, msg)
         print(msg)
         return {'FINISHED'}
+
 
 class MOLYMOD_OT_ClearAll(bpy.types.Operator):
     bl_idname = "molymod.clear_all"
@@ -196,4 +224,3 @@ class MOLYMOD_OT_ClearAll(bpy.types.Operator):
                 count += 1
         self.report({'INFO'}, f"Removed {count} objects.")
         return {'FINISHED'}
-
