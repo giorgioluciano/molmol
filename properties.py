@@ -38,6 +38,11 @@ class MOLYMOD_PG_Settings(bpy.types.PropertyGroup):
     bond_vertices: bpy.props.IntProperty(name="Vertices", default=30, min=3, soft_max=128)
     bond_mat_name: bpy.props.StringProperty(name="Bond Material", default="MolBond")
 
+    bond_tangent_factor: bpy.props.FloatProperty(
+        name="Bond Tangent Factor",
+        description="Fattore tangente per la spline Bezier dei legami (0=retta, <0.5=curva). tlen = dist * factor",
+        default=0.35, min=0.0, max=0.49, soft_min=0.1, soft_max=0.45
+    )
     # Caps
     use_caps: bpy.props.BoolProperty(name="Add Caps on Bonds", default=False)
     cap_template_name: bpy.props.StringProperty(name="Cap Template", default="")
