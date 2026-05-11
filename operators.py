@@ -74,6 +74,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 print(f"[Molymod] '{key}' not found (ok if unused). {e}")
 
         atoms, bonds, coords, types = parse_atoms_bonds(molfile, P.scale)
+        print("DEBUG atoms:", atoms)
         bond_orders = None
 
         if abs(P.compact_factor - 1.0) > 1e-9:
