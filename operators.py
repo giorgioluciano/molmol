@@ -77,7 +77,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
         # --- Parsing molecola via ASE ---
         atoms, bonds, coords, types = parse_atoms_bonds(molfile, P.scale)
-        bond_orders = None  # placeholder per doppi/tripli legami futuri
+        boatoms, bonds, coords, types, bond_orders = parse_atoms_bonds(molfile, P.scale)
 
         if abs(P.compact_factor - 1.0) > 1e-9:
             for k in coords:
