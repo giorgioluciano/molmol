@@ -30,15 +30,15 @@ def _make_bezier_bond(p0, p1, p2, p3, radius, name, context):
 
     bp0 = spline.bezier_points[0]
     bp0.co             = p0
-    bp0.handle_left    = p0  # handle non usato (inizio)
-    bp0.handle_right   = p1  # maniglia di uscita
+    bp0.handle_left    = p0
+    bp0.handle_right   = p1
     bp0.handle_left_type  = 'FREE'
     bp0.handle_right_type = 'FREE'
 
     bp1 = spline.bezier_points[1]
     bp1.co             = p3
-    bp1.handle_left    = p2  # maniglia di entrata
-    bp1.handle_right   = p3  # handle non usato (fine)
+    bp1.handle_left    = p2
+    bp1.handle_right   = p3
     bp1.handle_left_type  = 'FREE'
     bp1.handle_right_type = 'FREE'
 
@@ -69,7 +69,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 if o.name.startswith(("mol_", "bond_", "bond_cap", "DEBUG_")):
                     bpy.data.objects.remove(o, do_unlink=True)
 
-        # Assicura che tutte le collection generiche siano appendate
         for key in GEN_COLLECTIONS:
             try:
                 append_collection(P.lib_path, key)
@@ -78,17 +77,14 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
         # --- Parsing molecola via ASE ---
         atoms, bonds, coords, types = parse_atoms_bonds(molfile, P.scale)
-        # Placeholder: in futuro potrai far restituire anche bond_orders
-        bond_orders = None
+        bond_orders = None  # placeholder per doppi/tripli legami futuri
 
-        # Compattazione opzionale
         if abs(P.compact_factor - 1.0) > 1e-9:
             for k in coords:
                 coords[k] = coords[k] * P.compact_factor
 
         hole_cache    = {}
         placed        = {}
-        # {(idx_atomo, idx_vicino): Vector normalizzato dal foro verso il vicino}
         hole_dir_used = {}
 
         # --- Posizionamento atomi ---
@@ -97,17 +93,12 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             neighs = [t for s, t in bonds if s == idx] + [s for s, t in bonds if t == idx]
             nn     = len(neighs)
 
-            # choose_geometry_key può restituire qualcosa tipo "sp2", "sp3", "H", ecc.
-            # Qui lo mappiamo sempre a una collection Atom_*
+            # Mappa choose_geometry_key -> nome collection Atom_*
             base_key = choose_geometry_key(sym, nn)
-            if base_key.startswith("Atom_"):
-                key = base_key
-            else:
-                key = f"Atom_{base_key}"
+            key = base_key if base_key.startswith("Atom_") else f"Atom_{base_key}"
 
-            # Fallback robusto: se la collection non esiste, prova qualche default
+            # Fallback robusto se la collection non esiste in GEN_COLLECTIONS
             if key not in GEN_COLLECTIONS:
-                # Carbonio aromatico/tetraedrico → usa almeno Atom_sp3
                 if sym == "C":
                     key = "Atom_sp2" if "Atom_sp2" in GEN_COLLECTIONS else "Atom_sp3"
                 elif sym == "H":
@@ -120,19 +111,16 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                     hole_cache[key] = load_hole_dirs(P.lib_path, key)
                 except Exception as e:
                     print(f"[Molymod] ERROR loading hole dirs for '{key}':", e)
-                    # Nessun hole: l'atomo verrà comunque istanziato, ma senza orientamento avanzato
                     hole_cache[key] = []
 
             hole_vecs = hole_cache[key]
 
-            # Direzioni dei legami rispetto a questo atomo
             bond_dirs = []
             for n in neighs[:max(1, len(hole_vecs))]:
                 v = coords[n] - pos
                 if v.length > 1e-9:
                     bond_dirs.append(v.normalized())
 
-            # Istanzia la collection
             try:
                 bpy.ops.object.collection_instance_add(collection=key, location=(0, 0, 0))
             except Exception as e:
@@ -142,31 +130,24 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             inst = context.object
             inst.name = f"mol_{sym}_{idx}"
 
-            # --- Orientamento istanza ---
             if nn == 1 and (sym == "H" or sym in HALOGENS) and len(bond_dirs) == 1:
-                # H / alogeni: orienta asse scelto verso il legame e aggiungi roll opzionale
                 b = bond_dirs[0]
                 forward_local = axis_vec(P.H_forward_axis)
                 q_align = forward_local.rotation_difference(b)
                 q_roll  = Quaternion(b, radians(P.H_roll_deg))
                 inst.matrix_world = (q_roll @ q_align).to_matrix().to_4x4()
-
             elif len(hole_vecs) >= 2 and len(bond_dirs) >= 2:
-                # Geometrie con almeno due fori: usa Kabsch + Hungarian per la miglior corrispondenza
                 cost   = [[1.0 - max(-1.0, min(1.0, h.dot(b))) for b in bond_dirs] for h in hole_vecs]
                 rows, cols = hungarian_assign(cost)
                 from_v = [hole_vecs[i] for i in rows]
                 to_v   = [bond_dirs[j] for j in cols]
                 R = kabsch_rotation(from_v, to_v)
                 inst.matrix_world = R
-                # Memorizza corrispondenza foro→vicino dopo la rotazione
                 for r, c in zip(rows, cols):
                     n_idx = neighs[c]
                     rotated_hole = (R.to_3x3() @ hole_vecs[r]).normalized()
                     hole_dir_used[(idx, n_idx)] = rotated_hole
-
             elif len(bond_dirs) == 1 and len(hole_vecs) >= 1:
-                # Un solo legame e almeno un foro: allinea il foro più vicino alla direzione del legame
                 b = bond_dirs[0]
                 h = max(hole_vecs, key=lambda v: v.dot(b))
                 if h.dot(b) < 0.0:
@@ -176,22 +157,17 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 n_idx = neighs[0]
                 rotated_hole = (R.to_3x3() @ h).normalized()
                 hole_dir_used[(idx, n_idx)] = rotated_hole
-
             elif len(hole_vecs) >= 1 and len(bond_dirs) >= 1:
-                # Fallback: usa il primo foro e il primo legame
                 R = align_one_vector(hole_vecs[0], bond_dirs[0])
                 inst.matrix_world = R
                 n_idx = neighs[0]
                 rotated_hole = (R.to_3x3() @ hole_vecs[0]).normalized()
                 hole_dir_used[(idx, n_idx)] = rotated_hole
-
             else:
-                # Nessuna informazione direzionale → identità
                 inst.matrix_world = Matrix.Identity(4)
 
             inst.location = pos
 
-            # Rendi reali le istanze e tieni un solo oggetto per atomo
             bpy.ops.object.select_all(action='DESELECT')
             inst.select_set(True)
             bpy.context.view_layer.objects.active = inst
@@ -217,7 +193,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             else:
                 placed[idx] = inst
 
-        # Cap template/material (usato per i cappucci alle estremita')
+        # Cap template/material
         cap_template = None
         cap_mat      = None
         if P.use_caps:
@@ -225,7 +201,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             cap_mat      = _get_or_make_cap_material(P)
 
         bond_r = P.bond_radius * P.scale / 3.0
-        tf     = P.bond_tangent_factor  # 0..0.49, default 0.35
+        tf     = P.bond_tangent_factor
 
         # --- Disegno legami con spline Bezier ---
         for s, t in bonds:
@@ -241,24 +217,17 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             if dist <= 1e-9:
                 continue
 
-            # Offset di gap dal centro dell'atomo
             offA  = max(0.0, P.bond_gap_each_side) + P.bond_start_offset
             offB  = max(0.0, P.bond_gap_each_side) + P.bond_end_offset
             dirn  = vec.normalized()
-            p0    = pos_s + dirn * offA   # base cap lato s
-            p3    = pos_t - dirn * offB   # base cap lato t
+            p0    = pos_s + dirn * offA
+            p3    = pos_t - dirn * offB
 
-            # Direzione dei fori (gia' ruotata con l'atomo)
-            # Se non disponibile, fallback alla direzione del legame
-            dir_s = hole_dir_used.get((s, t), dirn)
-            dir_t = hole_dir_used.get((t, s), -dirn)
-
-            # tlen: lunghezza tangente = frazione della distanza effettiva p0-p3
+            # Tangenti lungo la direzione del legame: evita curve assurde
             eff_dist = (p3 - p0).length
             tlen     = eff_dist * tf
-
-            # P1: maniglia di uscita da p0 nella direzione del foro di s
-            # P2: maniglia di entrata su p3 nella direzione del foro di t
+            dir_s    = dirn
+            dir_t    = -dirn
             p1 = p0 + dir_s * tlen
             p2 = p3 + dir_t * tlen
 
@@ -266,10 +235,10 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             _make_bezier_bond(p0, p1, p2, p3, bond_r, bond_name, context)
 
             if P.use_caps and cap_mat:
-                _add_cap_at(p0,  dir_s,  P, cap_mat, cap_template)
-                _add_cap_at(p3,  dir_t,  P, cap_mat, cap_template)
+                _add_cap_at(p0, dir_s, P, cap_mat, cap_template)
+                _add_cap_at(p3, dir_t, P, cap_mat, cap_template)
 
-        self.report({'INFO'}, "Molymod build complete (Bezier bonds) ✅")
+        self.report({'INFO'}, "Molymod build complete (Bezier bonds) ")
         return {'FINISHED'}
 
 
