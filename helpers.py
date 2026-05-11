@@ -8,9 +8,22 @@ from ase.data import covalent_radii
 GEN_COLLECTIONS = ["Atom_sp3", "Atom_sp2", "Atom_sp", "Atom_bent", "Atom_sp3d2"]
 HALOGENS = {"F", "Cl", "Br", "I"}
 
+# Thresholds for bond order estimation based on inter-atomic distances (Angstrom)
+BOND_ORDER_THRESHOLDS = {
+    ('C', 'C'): [(1.60, 1), (1.42, 1.5), (1.34, 2), (1.20, 3)],
+    ('C', 'N'): [(1.50, 1), (1.35, 1.5), (1.28, 2), (1.16, 3)],
+    ('C', 'O'): [(1.45, 1), (1.35, 1.5), (1.22, 2)],
+    ('C', 'S'): [(1.85, 1), (1.65, 2)],
+    ('N', 'N'): [(1.45, 1), (1.25, 2), (1.10, 3)],
+    ('N', 'O'): [(1.45, 1), (1.22, 2)],
+    ('O', 'O'): [(1.48, 1), (1.21, 2)],
+}
+
+
 def abspath(path):
     """Get Blender-absolute or OS-absolute path."""
     return bpy.path.abspath(path)
+
 
 def ensure_hidden_bucket():
     """Get or create a collection for hidden technical objects."""
@@ -19,6 +32,7 @@ def ensure_hidden_bucket():
     if not coll:
         coll = bpy.data.collections.new(name)
     return coll
+
 
 def unlink_collection_everywhere(coll):
     """Recursively remove a collection from all possible parents in the .blend."""
@@ -36,6 +50,7 @@ def unlink_collection_everywhere(coll):
             try: parent.children.unlink(parent.children[target_name])
             except: pass
 
+
 def append_collection(lib_path, coll_name):
     """Append a collection from an external .blend library if not present."""
     lib_path = abspath(lib_path)
@@ -48,6 +63,7 @@ def append_collection(lib_path, coll_name):
         coll = bpy.data.collections[coll_name]
     unlink_collection_everywhere(coll)
     return coll
+
 
 def append_object(lib_path, obj_name):
     """Append a mesh/object from an external library into the hidden bucket."""
@@ -68,6 +84,7 @@ def append_object(lib_path, obj_name):
     ob.hide_select = True
     return ob
 
+
 def load_hole_dirs(lib_path, coll_key):
     """Load direction vectors (as Blender Vector) for all holes in a collection."""
     holes = []
@@ -80,6 +97,7 @@ def load_hole_dirs(lib_path, coll_key):
     if bpy.context.scene and bpy.context.scene.molymod_settings.debug_mode:
         print(f"[HOLES] {coll_key}: found {len(holes)} hole vectors")
     return holes
+
 
 def kabsch_rotation(from_vecs, to_vecs):
     """Calculate optimal rotation matrix (Kabsch algorithm) to align from_vecs to to_vecs."""
@@ -96,11 +114,13 @@ def kabsch_rotation(from_vecs, to_vecs):
                    (R[1,0], R[1,1], R[1,2]),
                    (R[2,0], R[2,1], R[2,2]))).to_4x4()
 
+
 def align_one_vector(src: Vector, dst: Vector):
     """Align a 'src' vector to a 'dst' vector using quaternion rotation."""
     s = src.normalized(); d = dst.normalized()
     q = s.rotation_difference(d)
     return q.to_matrix().to_4x4()
+
 
 def hungarian_assign(cost):
     """Optimal assignment (Hungarian method) for hole-to-bond vector matching."""
@@ -118,6 +138,7 @@ def hungarian_assign(cost):
                 best_val, best_perm = s, perm
         return list(range(m)), list(best_perm) if best_perm is not None else ([], [])
 
+
 def get_bonds(atoms):
     """Get bonds using neighbor list and covalent radii."""
     cutoffs = [covalent_radii[n] * 1.2 for n in atoms.numbers]
@@ -131,69 +152,47 @@ def get_bonds(atoms):
                 bonds.add((i, j))
     return list(bonds)
 
-def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
-    dirn = direction.normalized()
-    sR = P.cap_radius * P.cap_scale
-    sL = P.cap_length * P.cap_scale
-    q = cap_quaternion(dirn, P.cap_forward_axis, P.cap_roll_deg)
-    if cap_template is None:
-        bpy.ops.mesh.primitive_cone_add(
-            vertices=24, radius1=sR, radius2=0.0, depth=sL,
-            location=point, rotation=q.to_euler()
-        )
-        cap = bpy.context.object
-        if len(cap.data.materials) == 0:
-            cap.data.materials.append(cap_mat)
-        else:
-            cap.data.materials[0] = cap_mat
-        if P.debug_mode:
-            print(f"[CAP] Built-in cone at {tuple(point)}")
-        return cap
-    kind, ref = cap_template
-    if kind == "OBJECT":
-        cap = ref.copy()
-        cap.data = ref.data.copy()
-        cap.name = "bond_cap"
-        bpy.context.scene.collection.objects.link(cap)
-        cap.matrix_world = Matrix.Identity(4)
-        cap.location = point
-        cap.rotation_euler = q.to_euler()
-        cap.scale = (sR, sR, sL)
-        if len(cap.data.materials) == 0:
-            cap.data.materials.append(cap_mat)
-        else:
-            cap.data.materials[0] = cap_mat
-        if P.debug_mode:
-            print(f"[CAP] Duplicated OBJECT '{ref.name}' at {tuple(point)}")
-        return cap
-    if kind == "COLLECTION":
-        bpy.ops.object.collection_instance_add(collection=ref.name, location=(0, 0, 0))
-        inst = bpy.context.object
-        inst.name = "bond_cap"
-        inst.matrix_world = Matrix.Identity(4)
-        inst.location = point
-        inst.rotation_euler = q.to_euler()
-        inst.scale = (sR, sR, sL)
-        if P.debug_mode:
-            print(f"[CAP] Instanced COLLECTION '{ref.name}' at {tuple(point)}")
-        return inst
-    print("[CAP] Unknown template kind:", kind)
-    return None
+
+def _guess_bond_order(sym1, sym2, distance):
+    """Estimate bond order from distance using empirical thresholds."""
+    key = tuple(sorted([sym1, sym2]))
+    thresholds = BOND_ORDER_THRESHOLDS.get(key, [])
+    for (cutoff, order) in sorted(thresholds, key=lambda x: x[0]):
+        if distance <= cutoff:
+            return order
+    return 1  # default to single bond
+
 
 def parse_atoms_bonds(path, scale):
-    """Parse coordinates and bonds from PDB or CIF file using ASE.
-    For PDB files, reads bonds directly from CONECT records (accurate for organic molecules).
-    Falls back to ASE NeighborList for CIF and other formats.
-    Returns: atoms, bonds, coords, types."""
-    atoms_list, bonds, coords, types = [], [], {}, {}
+    """Parse atoms, bonds, and bond orders from molecular file using ASE.
+    
+    Pipeline:
+    1. Open file (PDB/XYZ/CIF/SDF/MOL)
+    2. Extract atoms + coordinates
+    3. Extract bonds (CONECT if available, else NeighborList)
+    4. Extract bond orders (from file if available, else heuristic)
+    5. Return: atoms_list, bonds, coords, types, bond_orders
+    """
     ext = os.path.splitext(path)[1].lower()
+    
+    # STEP 1: Open file
     try:
         if ext == ".cif":
             molecule = ase_read(path, format="cif")
         else:
             molecule = ase_read(path)
     except StopIteration:
-        raise ValueError(f"Il file {path} non contiene strutture leggibili o e' vuoto")
+        raise ValueError(f"File {path} contains no readable structures or is empty")
+    except Exception as e:
+        raise ValueError(f"Failed to read {path}: {e}")
+    
+    if len(molecule) == 0:
+        raise ValueError(f"File {path} contains no atoms")
+    
+    # STEP 2: Extract atoms
+    atoms_list = []
+    coords = {}
+    types = {}
     for i, atom in enumerate(molecule):
         idx = i + 1  # 1-based indexing
         sym = atom.symbol
@@ -201,37 +200,98 @@ def parse_atoms_bonds(path, scale):
         atoms_list.append((idx, sym, pos))
         coords[idx] = pos
         types[idx] = sym
-    # FIX: per PDB usa le CONECT invece della NeighborList (evita legami fantasma)
+    
+    print(f"[Parse] Found {len(atoms_list)} atoms in {os.path.basename(path)}")
+    
+    # STEP 3: Extract bonds
+    bonds = []
     if ext in (".pdb", ".ent"):
+        # PDB: use CONECT records (accurate for organic molecules)
         bond_set = set()
-        with open(path, "r") as f:
-            for line in f:
-                if line.startswith("CONECT"):
-                    fields = line.split()
-                    if len(fields) < 3:
-                        continue
-                    origin = int(fields[1])
-                    for target in fields[2:]:
-                        t = int(target)
-                        pair = (min(origin, t), max(origin, t))
-                        bond_set.add(pair)
-        for (i1, i2) in bond_set:
-            bonds.append((i1, i2))  # gia' 1-based come nel PDB
-    else:
-        # CIF e altri formati: usa NeighborList ASE
+        try:
+            with open(path, "r") as f:
+                for line in f:
+                    if line.startswith("CONECT"):
+                        fields = line.split()
+                        if len(fields) < 3:
+                            continue
+                        origin = int(fields[1])
+                        for target in fields[2:]:
+                            t = int(target)
+                            pair = (min(origin, t), max(origin, t))
+                            bond_set.add(pair)
+            bonds = list(bond_set)
+            print(f"[Parse] Found {len(bonds)} bonds from CONECT records")
+        except Exception as e:
+            print(f"[Parse] WARNING: Could not read CONECT records: {e}")
+    
+    if not bonds:
+        # Fallback: use ASE NeighborList
         for (i1, i2) in get_bonds(molecule):
             if i1 < i2:
                 bonds.append((i1 + 1, i2 + 1))
             else:
                 bonds.append((i2 + 1, i1 + 1))
-    return atoms_list, bonds, coords, types
+        print(f"[Parse] Computed {len(bonds)} bonds from NeighborList")
+    
+    # STEP 4: Extract/estimate bond orders
+    bond_orders = {}
+    
+    # Try to get bond orders from file (SDF/MOL formats)
+    if ext in (".sdf", ".mol", ".mol2"):
+        # For now, ASE doesn't expose bond orders directly in ase.Atoms
+        # We'll use heuristic fallback, but leave hook for RDKit if needed
+        print(f"[Parse] SDF/MOL format detected, but ASE doesn't expose bond orders. Using heuristic.")
+    
+    # Heuristic estimation from distances
+    for (i1, i2) in bonds:
+        sym1 = types[i1]
+        sym2 = types[i2]
+        dist = (coords[i2] - coords[i1]).length / scale  # back to Angstrom
+        order = _guess_bond_order(sym1, sym2, dist)
+        bond_orders[(i1, i2)] = order
+    
+    print(f"[Parse] Estimated bond orders for {len(bond_orders)} bonds")
+    
+    return atoms_list, bonds, coords, types, bond_orders
+
 
 def axis_vec(label: str) -> Vector:
     return {
-        'X+': Vector((1,0,0)), 'X-': Vector((-1,0,0)),
-        'Y+': Vector((0,1,0)), 'Y-': Vector((0,-1,0)),
-        'Z+': Vector((0,0,1)), 'Z-': Vector((0,0,-1)),
+        'X+': Vector((1,0,0)),
+        'X-': Vector((-1,0,0)),
+        'Y+': Vector((0,1,0)),
+        'Y-': Vector((0,-1,0)),
+        'Z+': Vector((0,0,1)),
+        'Z-': Vector((0,0,-1)),
     }[label]
+
+
+def choose_geometry_key(element: str, nn: int):
+    """Choose geometry key based on element and neighbor count.
+    Returns a key like 'sp2', 'sp3', etc. (without 'Atom_' prefix).
+    """
+    e = element
+    if nn <= 1 and (e == "H" or e in HALOGENS):
+        return "sp"
+    if nn == 2 and e in {"O", "S", "Se", "Te"}:
+        return "bent"
+    if e in {"N", "P", "As", "Sb"} and nn == 3:
+        return "sp2"
+    if e in {"N", "P", "As", "Sb"} and nn == 4:
+        return "sp3"
+    if e == "S" and nn >= 6:
+        return "sp3d2"
+    if e == "C":
+        if nn >= 4: return "sp3"
+        if nn == 3: return "sp2"
+        if nn <= 2: return "sp"
+    if nn >= 6: return "sp3d2"
+    if nn == 5: return "sp3d2"
+    if nn == 4: return "sp3"
+    if nn == 3: return "sp2"
+    return "sp"
+
 
 def _load_cap_template(P):
     name = (P.cap_template_name or "").strip()
@@ -256,6 +316,7 @@ def _load_cap_template(P):
         print(f"[CAP] Template '{name}' not found as Object or Collection: {e_col}")
     return None
 
+
 def _get_or_make_material(name, rgba):
     mat = bpy.data.materials.get(name)
     if not mat:
@@ -268,12 +329,14 @@ def _get_or_make_material(name, rgba):
             bsdf.inputs["Roughness"].default_value = 0.45
     return mat
 
+
 def _get_or_make_cap_material(P):
     if P.cap_mat_name in ["H","C","N","O","S","P","F","Cl","Br","I"]:
         col = getattr(P, f"col_{P.cap_mat_name}", (0.85, 0.85, 0.85, 1.0))
         return _get_or_make_material(f"Mol_{P.cap_mat_name}", col)
     else:
         return _get_or_make_material(P.cap_mat_name, (0.85, 0.85, 0.85, 1.0))
+
 
 def cap_quaternion(dirn: Vector, forward_axis: str, roll_deg: float) -> Quaternion:
     forward_local = axis_vec(forward_axis)
@@ -282,32 +345,64 @@ def cap_quaternion(dirn: Vector, forward_axis: str, roll_deg: float) -> Quaterni
     q_roll = Quaternion(dirn.normalized(), radians(roll_deg))
     return q_roll @ (q_align @ q_pre)
 
-def choose_geometry_key(element: str, nn: int):
-    """Choose geometry key based on element and neighbor count.
-    FIX: N/P/As/Sb con nn==3 ora restituisce Atom_sp2 (planare, aromatico).
-    Per ammine sp3 quaternarie (nn==4) restituisce Atom_sp3."""
-    e = element
-    if nn <= 1 and (e == "H" or e in HALOGENS):
-        return "Atom_sp"
-    if nn == 2 and e in {"O", "S", "Se", "Te"}:
-        return "Atom_bent"
-    # FIX: N con 3 legami e' sp2 (aromatico, es. carbazolo, piridina, pirrolo)
-    # Per N sp3 alifatico (ammina) il file PDB tipicamente ha nn=4 con H espliciti
-    if e in {"N", "P", "As", "Sb"} and nn == 3:
-        return "Atom_sp2"
-    if e in {"N", "P", "As", "Sb"} and nn == 4:
-        return "Atom_sp3"
-    if e == "S" and nn >= 6:
-        return "Atom_sp3d2"
-    if e == "C":
-        if nn >= 4: return "Atom_sp3"
-        if nn == 3: return "Atom_sp2"
-        if nn <= 2: return "Atom_sp"
-    if nn >= 6: return "Atom_sp3d2"
-    if nn == 5: return "Atom_sp3d2"
-    if nn == 4: return "Atom_sp3"
-    if nn == 3: return "Atom_sp2"
-    return "Atom_sp"
 
-# Alias per compatibilita' col vecchio naming
+def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
+    dirn = direction.normalized()
+    sR = P.cap_radius * P.cap_scale
+    sL = P.cap_length * P.cap_scale
+    q = cap_quaternion(dirn, P.cap_forward_axis, P.cap_roll_deg)
+    
+    if cap_template is None:
+        bpy.ops.mesh.primitive_cone_add(
+            vertices=24,
+            radius1=sR,
+            radius2=0.0,
+            depth=sL,
+            location=point,
+            rotation=q.to_euler()
+        )
+        cap = bpy.context.object
+        if len(cap.data.materials) == 0:
+            cap.data.materials.append(cap_mat)
+        else:
+            cap.data.materials[0] = cap_mat
+        if P.debug_mode:
+            print(f"[CAP] Built-in cone at {tuple(point)}")
+        return cap
+    
+    kind, ref = cap_template
+    if kind == "OBJECT":
+        cap = ref.copy()
+        cap.data = ref.data.copy()
+        cap.name = "bond_cap"
+        bpy.context.scene.collection.objects.link(cap)
+        cap.matrix_world = Matrix.Identity(4)
+        cap.location = point
+        cap.rotation_euler = q.to_euler()
+        cap.scale = (sR, sR, sL)
+        if len(cap.data.materials) == 0:
+            cap.data.materials.append(cap_mat)
+        else:
+            cap.data.materials[0] = cap_mat
+        if P.debug_mode:
+            print(f"[CAP] Duplicated OBJECT '{ref.name}' at {tuple(point)}")
+        return cap
+    
+    if kind == "COLLECTION":
+        bpy.ops.object.collection_instance_add(collection=ref.name, location=(0, 0, 0))
+        inst = bpy.context.object
+        inst.name = "bond_cap"
+        inst.matrix_world = Matrix.Identity(4)
+        inst.location = point
+        inst.rotation_euler = q.to_euler()
+        inst.scale = (sR, sR, sL)
+        if P.debug_mode:
+            print(f"[CAP] Instanced COLLECTION '{ref.name}' at {tuple(point)}")
+        return inst
+    
+    print("[CAP] Unknown template kind:", kind)
+    return None
+
+
+# Alias for compatibility
 _axis_vec = axis_vec
