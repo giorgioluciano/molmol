@@ -1,9 +1,18 @@
 import bpy, os, itertools
 from mathutils import Vector, Matrix, Quaternion
 from math import radians
-from ase.io import read as ase_read
-from ase.neighborlist import NeighborList
-from ase.data import covalent_radii
+try:
+    from ase.io import read as ase_read
+    from ase.neighborlist import NeighborList
+    from ase.data import covalent_radii
+    ASE_AVAILABLE = True
+except ImportError:
+    ase_read = None
+    NeighborList = None
+    covalent_radii = None
+    ASE_AVAILABLE = False
+    print("[Molymod] ASE not found: PDB-only mode active (CONECT records).")
+
 
 GEN_COLLECTIONS = ["Atom_sp3", "Atom_sp2", "Atom_sp", "Atom_bent", "Atom_sp3d2"]
 HALOGENS = {"F", "Cl", "Br", "I"}
