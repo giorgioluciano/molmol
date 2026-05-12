@@ -8,9 +8,9 @@ from .helpers import (
     append_collection, append_object, load_hole_dirs,
     kabsch_rotation, align_one_vector, hungarian_assign,
     parse_atoms_bonds, choose_geometry_key, axis_vec,
-    _load_cap_template, _get_or_make_cap_material, _add_cap_at
+    _load_cap_template, _get_or_make_cap_material, _add_cap_at,
+    assign_double_bond_holes
 )
-
 
 def _make_bezier_bond(p0, p1, p2, p3, radius, name, context):
     """Crea un legame come curva Bezier cubica con bevel (tubo 3D).
@@ -26,22 +26,24 @@ def _make_bezier_bond(p0, p1, p2, p3, radius, name, context):
     curve_data.use_fill_caps = True
     spline = curve_data.splines.new('BEZIER')
     spline.bezier_points.add(1)
+    
     bp0 = spline.bezier_points[0]
-    bp0.co           = p0
-    bp0.handle_left  = p0
+    bp0.co = p0
+    bp0.handle_left = p0
     bp0.handle_right = p1
-    bp0.handle_left_type  = 'FREE'
+    bp0.handle_left_type = 'FREE'
     bp0.handle_right_type = 'FREE'
+    
     bp1 = spline.bezier_points[1]
-    bp1.co           = p3
-    bp1.handle_left  = p2
+    bp1.co = p3
+    bp1.handle_left = p2
     bp1.handle_right = p3
-    bp1.handle_left_type  = 'FREE'
+    bp1.handle_left_type = 'FREE'
     bp1.handle_right_type = 'FREE'
+    
     obj = bpy.data.objects.new(name, curve_data)
     context.scene.collection.objects.link(obj)
     return obj
-
 
 def _pick_hole(hole_vecs_world, target_dir):
     """Dalla lista di vettori foro in world-space,
@@ -54,15 +56,14 @@ def _pick_hole(hole_vecs_world, target_dir):
         best = -best
     return best.normalized()
 
-
 class MOLYMOD_OT_Build(bpy.types.Operator):
-    bl_idname  = "molymod.build"
-    bl_label   = "Build Molecule from File"
+    bl_idname = "molymod.build"
+    bl_label = "Build Molecule from File"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        P       = context.scene.molymod_settings
-        lib     = abspath(P.lib_path)
+        P = context.scene.molymod_settings
+        lib = abspath(P.lib_path)
         molfile = abspath(P.molecule_path)
 
         if not os.path.isfile(lib):
@@ -89,17 +90,27 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             for k in coords:
                 coords[k] = coords[k] * P.compact_factor
 
-        hole_cache    = {}
-        placed        = {}
+        hole_cache = {}
+        placed = {}
         all_hole_dirs = {}
+        hole_assignments = {}
 
+        # ============ LOOP ATOMI ============
         for idx, sym, _pos_unused in atoms:
-            pos    = coords[idx]
+            pos = coords[idx]
             neighs = [t for s, t in bonds if s == idx] + \
                      [s for s, t in bonds if t == idx]
             nn = len(neighs)
 
-            base_key = choose_geometry_key(sym, nn)
+            # nn_effective: conta i fori fisicamente occupati (doppio=2, triplo=3)
+            nn_effective = 0
+            for n in neighs:
+                k = (min(idx, n), max(idx, n))
+                order = bond_orders.get(k, 1)
+                nn_effective += max(1, round(order)) if order != 1.5 else 2
+            nn_effective = max(nn, nn_effective)
+
+            base_key = choose_geometry_key(sym, nn_effective)
             key = base_key if base_key.startswith("Atom_") else f"Atom_{base_key}"
 
             if key not in GEN_COLLECTIONS:
@@ -118,7 +129,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                     hole_cache[key] = []
 
             hole_vecs = hole_cache[key]
-
             bond_dirs = []
             for n in neighs[:max(1, len(hole_vecs))]:
                 v = coords[n] - pos
@@ -133,20 +143,20 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             inst = context.object
             inst.name = f"mol_{sym}_{idx}"
-
             R = Matrix.Identity(4)
+
             if nn == 1 and (sym == "H" or sym in HALOGENS) and len(bond_dirs) == 1:
                 b = bond_dirs[0]
                 forward_local = axis_vec(P.H_forward_axis)
                 q_align = forward_local.rotation_difference(b)
-                q_roll  = Quaternion(b, radians(P.H_roll_deg))
+                q_roll = Quaternion(b, radians(P.H_roll_deg))
                 R = (q_roll @ q_align).to_matrix().to_4x4()
             elif len(hole_vecs) >= 2 and len(bond_dirs) >= 2:
-                cost = [[1.0 - max(-1.0, min(1.0, h.dot(b)))
-                         for b in bond_dirs] for h in hole_vecs]
+                cost = [[1.0 - max(-1.0, min(1.0, h.dot(b))) for b in bond_dirs]
+                        for h in hole_vecs]
                 rows, cols = hungarian_assign(cost)
                 from_v = [hole_vecs[i] for i in rows]
-                to_v   = [bond_dirs[j] for j in cols]
+                to_v = [bond_dirs[j] for j in cols]
                 R = kabsch_rotation(from_v, to_v)
             elif len(bond_dirs) == 1 and len(hole_vecs) >= 1:
                 b = bond_dirs[0]
@@ -163,9 +173,19 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             R3 = R.to_3x3()
             all_hole_dirs[idx] = [(R3 @ h).normalized() for h in hole_vecs]
 
+            # Assegna fori per doppi legami
+            neighbors_with_orders = [
+                (n, (coords[n] - pos).normalized(), bond_orders.get((min(idx,n), max(idx,n)), 1))
+                for n in neighs if (coords[n] - pos).length > 1e-9
+            ]
+            hole_assignments[idx] = assign_double_bond_holes(
+                all_hole_dirs[idx], neighbors_with_orders
+            )
+
             bpy.ops.object.select_all(action='DESELECT')
             inst.select_set(True)
             bpy.context.view_layer.objects.active = inst
+
             try:
                 bpy.ops.object.duplicates_make_real(
                     use_hierarchy=True,
@@ -188,14 +208,15 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             else:
                 placed[idx] = inst
 
+        # ============ LOOP BOND ============
         cap_template = None
-        cap_mat      = None
+        cap_mat = None
         if P.use_caps:
             cap_template = _load_cap_template(P)
-            cap_mat      = _get_or_make_cap_material(P)
+            cap_mat = _get_or_make_cap_material(P)
 
         bond_r = P.bond_radius * P.scale / 3.0
-        tf     = P.bond_tangent_factor
+        tf = P.bond_tangent_factor
 
         for s, t in bonds:
             if s not in placed or t not in placed:
@@ -205,68 +226,86 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             pos_s = coords[s]
             pos_t = coords[t]
-            vec   = pos_t - pos_s
-            dist  = vec.length
+            vec = pos_t - pos_s
+            dist = vec.length
             if dist <= 1e-9:
                 continue
 
             offA = max(0.0, P.bond_gap_each_side) + P.bond_start_offset
             offB = max(0.0, P.bond_gap_each_side) + P.bond_end_offset
             dirn = vec.normalized()
-            p0   = pos_s + dirn * offA
-            p3   = pos_t - dirn * offB
 
+            p0 = pos_s + dirn * offA
+            p3 = pos_t - dirn * offB
             eff_dist = (p3 - p0).length
-            tlen     = eff_dist * tf
+            tlen = eff_dist * tf
 
-            h_s = _pick_hole(all_hole_dirs.get(s, []), dirn)
-            h_t = _pick_hole(all_hole_dirs.get(t, []), -dirn)
+            order = bond_orders.get((s, t), bond_orders.get((t, s), 1))
+            n_tubes = max(1, round(order)) if order != 1.5 else 2
 
-            p1 = p0 + h_s * tlen
-            p2 = p3 + h_t * tlen
+            # Fori assegnati dal pre-calcolo, fallback a _pick_hole
+            holes_s_all = hole_assignments.get(s, {}).get(t, [])
+            holes_t_all = hole_assignments.get(t, {}).get(s, [])
 
-            bond_name = f"bond_{s}_{t}"
-            _make_bezier_bond(p0, p1, p2, p3, bond_r, bond_name, context)
+            # Garantisci n_tubes fori per lato, con fallback
+            while len(holes_s_all) < n_tubes:
+                holes_s_all.append(_pick_hole(all_hole_dirs.get(s, []), dirn))
+            while len(holes_t_all) < n_tubes:
+                holes_t_all.append(_pick_hole(all_hole_dirs.get(t, []), -dirn))
 
-            if P.use_caps and cap_mat:
-                _add_cap_at(p0, h_s, P, cap_mat, cap_template)
-                _add_cap_at(p3, h_t, P, cap_mat, cap_template)
+            for tube_i in range(n_tubes):
+                h_s = holes_s_all[tube_i].normalized()
+                h_t = holes_t_all[tube_i].normalized()
 
-        self.report({'INFO'}, "Molymod build complete (hole-guided Bezier bonds)")
+                p1 = p0 + h_s * tlen
+                p2 = p3 + h_t * tlen
+
+                tube_name = f"bond_{s}_{t}" if n_tubes == 1 else f"bond_{s}_{t}_{tube_i}"
+                tube_r = bond_r if order == 1 else (bond_r * (0.85 if n_tubes == 2 else 0.7))
+                _make_bezier_bond(p0, p1, p2, p3, tube_r, tube_name, context)
+
+                if P.use_caps and cap_mat:
+                    _add_cap_at(p0, h_s, P, cap_mat, cap_template)
+                    _add_cap_at(p3, h_t, P, cap_mat, cap_template)
+
+        self.report({'INFO'}, "Molymod build complete (multi-tube double bonds)")
         return {'FINISHED'}
 
-
 class MOLYMOD_OT_ValidateLibrary(bpy.types.Operator):
-    bl_idname  = "molymod.validate_library"
-    bl_label   = "Validate Library"
+    bl_idname = "molymod.validate_library"
+    bl_label = "Validate Library"
     bl_options = {'REGISTER',}
 
     def execute(self, context):
-        P   = context.scene.molymod_settings
+        P = context.scene.molymod_settings
         lib = abspath(P.lib_path)
+
         if not os.path.isfile(lib):
             self.report({'ERROR'}, f"Library .blend not found: {lib}")
             return {'CANCELLED'}
+
         missing = []
         with bpy.data.libraries.load(lib, link=False) as (src, dst):
             src_colls = set(src.collections)
-            src_objs  = set(src.objects)
+            src_objs = set(src.objects)
+
         for ck in GEN_COLLECTIONS:
             if ck not in src_colls:
                 missing.append(f"[Collection] {ck}")
+
         for ck in GEN_COLLECTIONS:
             if not any(name.startswith(f"{ck}_hole") for name in src_objs):
                 missing.append(f"[Holes] {ck}_hole#")
+
         msg = ("Missing in library:\n- " + "\n- ".join(missing)) if missing else \
               "Library looks good: all Atom_sp* collections and holes found."
         self.report({'INFO'}, msg)
         print(msg)
         return {'FINISHED'}
 
-
 class MOLYMOD_OT_ClearAll(bpy.types.Operator):
-    bl_idname  = "molymod.clear_all"
-    bl_label   = "Clear All Molecules"
+    bl_idname = "molymod.clear_all"
+    bl_label = "Clear All Molecules"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
