@@ -173,14 +173,19 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             R3 = R.to_3x3()
             all_hole_dirs[idx] = [(R3 @ h).normalized() for h in hole_vecs]
 
-            # Assegna fori per doppi legami
-            neighbors_with_orders = [
-                (n, (coords[n] - pos).normalized(), bond_orders.get((min(idx,n), max(idx,n)), 1))
-                for n in neighs if (coords[n] - pos).length > 1e-9
-            ]
-            hole_assignments[idx] = assign_double_bond_holes(
-                all_hole_dirs[idx], neighbors_with_orders
+            # Assegna fori per doppi legami (solo se ci sono legami multipli)
+            has_multiple_bonds = any(
+                bond_orders.get((min(idx, n), max(idx, n)), 1) > 1
+                for n in neighs
             )
+            if has_multiple_bonds:
+                neighbors_with_orders = [
+                    (n, (coords[n] - pos).normalized(), bond_orders.get((min(idx,n), max(idx,n)), 1))
+                    for n in neighs if (coords[n] - pos).length > 1e-9
+                ]
+                hole_assignments[idx] = assign_double_bond_holes(
+                    all_hole_dirs[idx], neighbors_with_orders
+                )
 
             bpy.ops.object.select_all(action='DESELECT')
             inst.select_set(True)
@@ -241,34 +246,52 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             tlen = eff_dist * tf
 
             order = bond_orders.get((s, t), bond_orders.get((t, s), 1))
-            n_tubes = max(1, round(order)) if order != 1.5 else 2
-
-            # Fori assegnati dal pre-calcolo, fallback a _pick_hole
-            holes_s_all = hole_assignments.get(s, {}).get(t, [])
-            holes_t_all = hole_assignments.get(t, {}).get(s, [])
-
-            # Garantisci n_tubes fori per lato, con fallback
-            while len(holes_s_all) < n_tubes:
-                holes_s_all.append(_pick_hole(all_hole_dirs.get(s, []), dirn))
-            while len(holes_t_all) < n_tubes:
-                holes_t_all.append(_pick_hole(all_hole_dirs.get(t, []), -dirn))
-
-            for tube_i in range(n_tubes):
-                h_s = holes_s_all[tube_i].normalized()
-                h_t = holes_t_all[tube_i].normalized()
-
+            
+            # LEGAMI SINGOLI: usa logica VECCHIA (identica a prima del fix)
+            if order == 1:
+                h_s = _pick_hole(all_hole_dirs.get(s, []), dirn)
+                h_t = _pick_hole(all_hole_dirs.get(t, []), -dirn)
+                
                 p1 = p0 + h_s * tlen
                 p2 = p3 + h_t * tlen
-
-                tube_name = f"bond_{s}_{t}" if n_tubes == 1 else f"bond_{s}_{t}_{tube_i}"
-                tube_r = bond_r if order == 1 else (bond_r * (0.85 if n_tubes == 2 else 0.7))
-                _make_bezier_bond(p0, p1, p2, p3, tube_r, tube_name, context)
-
+                
+                tube_name = f"bond_{s}_{t}"
+                _make_bezier_bond(p0, p1, p2, p3, bond_r, tube_name, context)
+                
                 if P.use_caps and cap_mat:
                     _add_cap_at(p0, h_s, P, cap_mat, cap_template)
                     _add_cap_at(p3, h_t, P, cap_mat, cap_template)
+            
+            # LEGAMI MULTIPLI: usa logica NUOVA (multi-tubo)
+            else:
+                n_tubes = max(1, round(order)) if order != 1.5 else 2
+                
+                # Fori assegnati dal pre-calcolo
+                holes_s_all = hole_assignments.get(s, {}).get(t, [])
+                holes_t_all = hole_assignments.get(t, {}).get(s, [])
+                
+                # Fallback se mancano fori
+                if len(holes_s_all) < n_tubes:
+                    holes_s_all = [_pick_hole(all_hole_dirs.get(s, []), dirn) for _ in range(n_tubes)]
+                if len(holes_t_all) < n_tubes:
+                    holes_t_all = [_pick_hole(all_hole_dirs.get(t, []), -dirn) for _ in range(n_tubes)]
+                
+                for tube_i in range(n_tubes):
+                    h_s = holes_s_all[tube_i].normalized()
+                    h_t = holes_t_all[tube_i].normalized()
+                    
+                    p1 = p0 + h_s * tlen
+                    p2 = p3 + h_t * tlen
+                    
+                    tube_name = f"bond_{s}_{t}_{tube_i}"
+                    tube_r = bond_r * (0.85 if n_tubes == 2 else 0.7)
+                    _make_bezier_bond(p0, p1, p2, p3, tube_r, tube_name, context)
+                    
+                    if P.use_caps and cap_mat:
+                        _add_cap_at(p0, h_s, P, cap_mat, cap_template)
+                        _add_cap_at(p3, h_t, P, cap_mat, cap_template)
 
-        self.report({'INFO'}, "Molymod build complete (multi-tube double bonds)")
+        self.report({'INFO'}, "Molymod build complete")
         return {'FINISHED'}
 
 class MOLYMOD_OT_ValidateLibrary(bpy.types.Operator):
