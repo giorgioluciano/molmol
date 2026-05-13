@@ -3,7 +3,7 @@ from math import radians
 from mathutils import Vector, Matrix, Quaternion
 
 from .helpers import (
-    GEN_COLLECTIONS, HALOGENS,
+    GEN_COLLECTIONS, HALOGENS, MIN_VALENCE,
     abspath, ensure_hidden_bucket, unlink_collection_everywhere,
     append_collection, append_object, load_hole_dirs,
     kabsch_rotation, align_one_vector, hungarian_assign,
@@ -102,13 +102,17 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                      [s for s, t in bonds if t == idx]
             nn = len(neighs)
 
-            # nn_effective: conta i fori fisicamente occupati (doppio=2, triplo=3)
+            # nn_effective: somma dei fori occupati da tutti i legami
+            # Ogni legame di ordine N occupa round(N) fori
             nn_effective = 0
             for n in neighs:
                 k = (min(idx, n), max(idx, n))
                 order = bond_orders.get(k, 1)
-                nn_effective += max(1, round(order)) if order != 1.5 else 2
-            nn_effective = max(nn, nn_effective)
+                nn_effective += round(order)  # 1→1, 2→2, 3→3, 1.5→2 (dopo kekulize)
+            
+            # Rispetta valenza minima dell'elemento (C sempre 4, N sempre 3, etc)
+            min_valence = MIN_VALENCE.get(sym, nn)
+            nn_effective = max(nn_effective, min_valence)
 
             base_key = choose_geometry_key(sym, nn_effective)
             key = base_key if base_key.startswith("Atom_") else f"Atom_{base_key}"
@@ -173,9 +177,9 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             R3 = R.to_3x3()
             all_hole_dirs[idx] = [(R3 @ h).normalized() for h in hole_vecs]
 
-            # Assegna fori per doppi legami (solo se ci sono legami multipli)
+            # Assegna fori per legami multipli (solo se ci sono doppi/tripli)
             has_multiple_bonds = any(
-                bond_orders.get((min(idx, n), max(idx, n)), 1) > 1
+                bond_orders.get((min(idx, n), max(idx, n)), 1) >= 2
                 for n in neighs
             )
             if has_multiple_bonds:
@@ -247,7 +251,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             order = bond_orders.get((s, t), bond_orders.get((t, s), 1))
             
-            # LEGAMI SINGOLI: usa logica VECCHIA (identica a prima del fix)
+            # LEGAMI SINGOLI: usa logica VECCHIA (identica a prima)
             if order == 1:
                 h_s = _pick_hole(all_hole_dirs.get(s, []), dirn)
                 h_t = _pick_hole(all_hole_dirs.get(t, []), -dirn)
@@ -262,9 +266,9 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                     _add_cap_at(p0, h_s, P, cap_mat, cap_template)
                     _add_cap_at(p3, h_t, P, cap_mat, cap_template)
             
-            # LEGAMI MULTIPLI: usa logica NUOVA (multi-tubo)
+            # LEGAMI MULTIPLI (doppi/tripli - aromatici kekulizzati inclusi): multi-tubo
             else:
-                n_tubes = max(1, round(order)) if order != 1.5 else 2
+                n_tubes = round(order)  # 2→2, 3→3 (aromatici già kekulizzati a 1 o 2)
                 
                 # Fori assegnati dal pre-calcolo
                 holes_s_all = hole_assignments.get(s, {}).get(t, [])
@@ -284,7 +288,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                     p2 = p3 + h_t * tlen
                     
                     tube_name = f"bond_{s}_{t}_{tube_i}"
-                    tube_r = bond_r * (0.85 if n_tubes == 2 else 0.7)
+                    tube_r = bond_r * 0.85  # leggermente più sottile per distinguere
                     _make_bezier_bond(p0, p1, p2, p3, tube_r, tube_name, context)
                     
                     if P.use_caps and cap_mat:
