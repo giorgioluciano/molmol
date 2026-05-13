@@ -1,6 +1,7 @@
 import bpy, os, itertools
 from mathutils import Vector, Matrix, Quaternion
 from math import radians
+from collections import defaultdict, deque
 
 try:
     from ase.io import read as ase_read
@@ -26,6 +27,16 @@ except ImportError:
 
 GEN_COLLECTIONS = ["Atom_sp3", "Atom_sp2", "Atom_sp", "Atom_bent", "Atom_sp3d2"]
 HALOGENS = {"F", "Cl", "Br", "I"}
+
+# Valenze minime per elementi (numero fori minimi necessari)
+MIN_VALENCE = {
+    'C': 4,  # tetravalente
+    'N': 3,  # trivalente
+    'O': 2,  # bivalente
+    'S': 2,
+    'P': 3,
+    'H': 1,
+}
 
 # Thresholds for bond order estimation based on inter-atomic distances (Angstrom)
 BOND_ORDER_THRESHOLDS = {
@@ -216,6 +227,152 @@ def _parse_bond_orders_rdkit(path, atom_index_offset=1):
     print(f"[Molymod] RDKit: read {len(bond_orders)} bond orders from {os.path.basename(path)}")
     return bond_orders
 
+def find_rings(bonds, max_size=20):
+    """
+    Trova tutti gli anelli semplici nella molecola usando DFS.
+    Returns: list of rings, each ring is a list of atom indices
+    """
+    # Build adjacency graph
+    graph = defaultdict(list)
+    for s, t in bonds:
+        graph[s].append(t)
+        graph[t].append(s)
+    
+    rings = []
+    visited_edges = set()
+    
+    def dfs_ring(start, current, parent, path):
+        """DFS per trovare cicli"""
+        if len(path) > max_size:
+            return
+        
+        for neighbor in graph[current]:
+            if neighbor == parent:
+                continue
+            
+            edge = (min(current, neighbor), max(current, neighbor))
+            if edge in visited_edges:
+                continue
+            
+            if neighbor == start and len(path) >= 3:
+                # Trovato un ciclo
+                rings.append(list(path))
+                return
+            
+            if neighbor not in path:
+                path.append(neighbor)
+                dfs_ring(start, neighbor, current, path)
+                path.pop()
+    
+    # Prova a partire da ogni nodo
+    all_nodes = set()
+    for s, t in bonds:
+        all_nodes.add(s)
+        all_nodes.add(t)
+    
+    for node in sorted(all_nodes):
+        dfs_ring(node, node, None, [node])
+    
+    # Rimuovi duplicati (stesso anello in ordine diverso)
+    unique_rings = []
+    seen = set()
+    for ring in rings:
+        # Normalizza: parti dal minimo e ruota
+        min_idx = ring.index(min(ring))
+        normalized = tuple(ring[min_idx:] + ring[:min_idx])
+        # Considera anche l'ordine inverso
+        normalized_rev = tuple(reversed(normalized))
+        canonical = min(normalized, normalized_rev)
+        if canonical not in seen:
+            seen.add(canonical)
+            unique_rings.append(list(canonical))
+    
+    print(f"[Molymod] Found {len(unique_rings)} rings")
+    return unique_rings
+
+def is_aromatic_ring(ring, bond_orders):
+    """Check if all bonds in ring are aromatic (order ~1.5)"""
+    for i in range(len(ring)):
+        s = ring[i]
+        t = ring[(i+1) % len(ring)]
+        order = bond_orders.get((min(s,t), max(s,t)), 1)
+        if abs(order - 1.5) > 0.2:  # tolleranza
+            return False
+    return True
+
+def find_fusion_bonds(rings):
+    """Trova legami condivisi tra anelli (fusione)"""
+    bond_count = defaultdict(int)
+    for ring in rings:
+        for i in range(len(ring)):
+            s = ring[i]
+            t = ring[(i+1) % len(ring)]
+            bond_count[(min(s,t), max(s,t))] += 1
+    
+    # Legami con count > 1 sono fusioni
+    fusion = {bond for bond, count in bond_count.items() if count > 1}
+    if fusion:
+        print(f"[Molymod] Found {len(fusion)} fusion bonds: {fusion}")
+    return fusion
+
+def kekulize_rings(rings, bond_orders):
+    """
+    Converte anelli aromatici (order=1.5) in pattern alternato Kekulé (1,2,1,2...)
+    Gestisce anche anelli fusi (naftalene, indolo, etc)
+    """
+    aromatic_rings = [r for r in rings if is_aromatic_ring(r, bond_orders)]
+    if not aromatic_rings:
+        return
+    
+    print(f"[Molymod] Kekulizing {len(aromatic_rings)} aromatic rings")
+    
+    # Trova legami di fusione
+    fusion_bonds = find_fusion_bonds(aromatic_rings)
+    
+    # Processa anelli dal più grande al più piccolo
+    aromatic_rings.sort(key=len, reverse=True)
+    
+    processed_bonds = set()
+    
+    for ring in aromatic_rings:
+        # Trova punto di partenza: preferibilmente dopo un legame di fusione già assegnato
+        start_idx = 0
+        fusion_found = False
+        
+        for i in range(len(ring)):
+            s = ring[i]
+            t = ring[(i+1) % len(ring)]
+            key = (min(s,t), max(s,t))
+            
+            if key in fusion_bonds and key in processed_bonds:
+                # Parti da dopo questo legame di fusione
+                start_idx = (i + 1) % len(ring)
+                fusion_found = True
+                break
+        
+        # Alterna ordini partendo da start_idx
+        for j in range(len(ring)):
+            i = (start_idx + j) % len(ring)
+            s = ring[i]
+            t = ring[(i+1) % len(ring)]
+            key = (min(s,t), max(s,t))
+            
+            if key in processed_bonds:
+                # Legame già assegnato da anello precedente
+                continue
+            
+            # Pattern alternato: pari=1, dispari=2
+            # Ma se è un legame di fusione e non è il primo, forza singolo
+            if key in fusion_bonds and not fusion_found:
+                new_order = 1
+            else:
+                new_order = 1 if j % 2 == 0 else 2
+            
+            bond_orders[key] = new_order
+            processed_bonds.add(key)
+    
+    print(f"[Molymod] Kekulization complete: {len(processed_bonds)} bonds alternated")
+
 def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
     """
     Assegna i fori dell'atomo ai neighbor tenendo conto degli ordini di legame.
@@ -233,7 +390,7 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
     # Espandi i neighbor in "slot" in base all'ordine di legame
     slots = []  # (neighbor_idx, dir)
     for n_idx, dirn, order in neighbors_dirs:
-        n_slots = max(1, round(order)) if order != 1.5 else 2
+        n_slots = round(order)  # 1→1, 2→2, 3→3
         for k in range(n_slots):
             slots.append((n_idx, dirn))
 
@@ -279,7 +436,8 @@ def parse_atoms_bonds(path, scale):
     2. Extract atoms + coordinates
     3. Extract bonds (CONECT if available, else NeighborList)
     4. Extract bond orders (RDKit if available, CONECT multiplicity, else heuristic)
-    5. Return: atoms_list, bonds, coords, types, bond_orders
+    5. Kekulize aromatic rings (convert 1.5 → alternating 1,2,1,2...)
+    6. Return: atoms_list, bonds, coords, types, bond_orders
     """
     ext = os.path.splitext(path)[1].lower()
 
@@ -384,6 +542,11 @@ def parse_atoms_bonds(path, scale):
             if k not in bond_orders:
                 bond_orders[k] = 1
 
+    # STEP 5: KEKULIZE aromatic rings (convert 1.5 → 1,2,1,2...)
+    rings = find_rings(bonds)
+    if rings:
+        kekulize_rings(rings, bond_orders)
+
     print(f"[Parse] Final: {len(bond_orders)} bonds with orders")
     return atoms_list, bonds, coords, types, bond_orders
 
@@ -394,30 +557,21 @@ def axis_vec(label: str) -> Vector:
         'Z+': Vector((0,0,1)), 'Z-': Vector((0,0,-1)),
     }[label]
 
-def choose_geometry_key(element: str, nn: int):
-    """Choose geometry key based on element and neighbor count.
-    Returns a key like 'sp2', 'sp3', etc. (without 'Atom_' prefix).
+def choose_geometry_key(element: str, nn_holes: int):
+    """Choose geometry key based on element and total holes needed.
+    nn_holes = numero totale di fori necessari (non numero di neighbor!)
     """
-    e = element
-    if nn <= 1 and (e == "H" or e in HALOGENS):
+    if nn_holes <= 1:
         return "sp"
-    if nn == 2 and e in {"O", "S", "Se", "Te"}:
-        return "bent"
-    if e in {"N", "P", "As", "Sb"} and nn == 3:
+    if nn_holes == 2:
+        return "bent" if element in {"O", "S", "Se", "Te"} else "sp"
+    if nn_holes == 3:
         return "sp2"
-    if e in {"N", "P", "As", "Sb"} and nn == 4:
+    if nn_holes == 4:
         return "sp3"
-    if e == "S" and nn >= 6:
+    if nn_holes >= 5:
         return "sp3d2"
-    if e == "C":
-        if nn >= 4: return "sp3"
-        if nn == 3: return "sp2"
-        if nn <= 2: return "sp"
-    if nn >= 6: return "sp3d2"
-    if nn == 5: return "sp3d2"
-    if nn == 4: return "sp3"
-    if nn == 3: return "sp2"
-    return "sp"
+    return "sp3"
 
 def _load_cap_template(P):
     name = (P.cap_template_name or "").strip()
