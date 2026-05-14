@@ -127,6 +127,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         all_hole_dirs = {}
         hole_assignments = {}
         atom_radii = {}
+        used_holes = {}  # ← TRACCIAMENTO FORI USATI
 
         # ============ LOOP ATOMI ============
         print("\n[ATOMS] Placing and orienting atoms...")
@@ -141,7 +142,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             for n in neighs:
                 k = (min(idx, n), max(idx, n))
                 order = bond_orders.get(k, 1)
-                nn_effective += round(order)  # 1→1, 2→2, 3→3
+                nn_effective += round(order)
             
             # Rispetta valenza minima elemento (C sempre 4, etc)
             min_valence = MIN_VALENCE.get(sym, nn)
@@ -181,7 +182,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             inst = context.object
             inst.name = f"mol_{sym}_{idx}"
             
-            # COORDINATE FISSE! Non si toccano più dopo questa riga
+            # COORDINATE FISSE!
             inst.location = pos
             
             # Calcola rotazione per orientare fori
@@ -209,7 +210,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             elif len(hole_vecs) >= 1 and len(bond_dirs) >= 1:
                 R = align_one_vector(hole_vecs[0], bond_dirs[0])
 
-            # Applica solo ROTAZIONE (non traslazione!)
+            # Applica solo ROTAZIONE
             inst.rotation_euler = R.to_euler()
 
             R3 = R.to_3x3()
@@ -260,6 +261,9 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             dims = atom_obj.dimensions
             atom_radii[idx] = max(dims) / 2.0 if max(dims) > 0 else 0.5
             
+            # Inizializza tracking fori usati
+            used_holes[idx] = []
+            
             if P.debug_mode:
                 print(f"[DEBUG] Atom {idx} ({sym}): radius={atom_radii[idx]:.3f}")
 
@@ -277,6 +281,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         tf = P.bond_tangent_factor
 
         bonds_drawn = 0
+        
         for s, t in bonds:
             if s not in placed or t not in placed:
                 continue
@@ -300,20 +305,39 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             
             # ========== LEGAMI SINGOLI ==========
             if order == 1:
-                h_s = _pick_hole(all_hole_dirs.get(s, []), dirn)
-                h_t = _pick_hole(all_hole_dirs.get(t, []), -dirn)
+                # Ottieni fori LIBERI (non usati)
+                holes_s_all = all_hole_dirs.get(s, [])
+                holes_t_all = all_hole_dirs.get(t, [])
                 
-                # Partenza dalla SUPERFICIE nella direzione del FORO
+                # Filtra fori già usati
+                free_holes_s = [h for i, h in enumerate(holes_s_all) if i not in used_holes.get(s, [])]
+                free_holes_t = [h for i, h in enumerate(holes_t_all) if i not in used_holes.get(t, [])]
+                
+                if not free_holes_s or not free_holes_t:
+                    print(f"[WARNING] No free holes for bond {s}-{t}!")
+                    continue
+                
+                # Scegli miglior foro tra quelli LIBERI
+                h_s = max(free_holes_s, key=lambda h: h.dot(dirn))
+                h_t = max(free_holes_t, key=lambda h: h.dot(-dirn))
+                if h_t.dot(-dirn) < 0:
+                    h_t = -h_t
+                
+                # MARCA FORI COME USATI
+                idx_s = holes_s_all.index(h_s)
+                idx_t = holes_t_all.index(h_t)
+                used_holes[s].append(idx_s)
+                used_holes[t].append(idx_t)
+                
+                # Partenza dalla superficie
                 p0 = pos_s + h_s * radius_s
                 p3 = pos_t + h_t * radius_t
                 
-                # Verifica se fori opposti (legame dritto)
-                if abs(h_s.dot(h_t) + 1.0) < 0.1:  # Opposti
-                    # Cilindro dritto
+                # Verifica se opposti (legame dritto)
+                if abs(h_s.dot(h_t) + 1.0) < 0.1:
                     tube_name = f"bond_{s}_{t}"
                     _create_straight_cylinder(p0, p3, bond_r, tube_name, context)
                 else:
-                    # Bezier leggero (caso raro)
                     eff_dist = (p3 - p0).length
                     tlen = eff_dist * tf
                     p1 = p0 + h_s * tlen
@@ -329,27 +353,43 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             
             # ========== LEGAMI MULTIPLI ==========
             else:
-                n_tubes = round(order)  # 2 o 3
+                n_tubes = round(order)
                 
-                # Fori assegnati
-                holes_s_all = hole_assignments.get(s, {}).get(t, [])
-                holes_t_all = hole_assignments.get(t, {}).get(s, [])
+                # Ottieni fori LIBERI
+                holes_s_all = all_hole_dirs.get(s, [])
+                holes_t_all = all_hole_dirs.get(t, [])
                 
-                # Fallback
-                if len(holes_s_all) < n_tubes:
-                    holes_s_all = [_pick_hole(all_hole_dirs.get(s, []), dirn) for _ in range(n_tubes)]
-                if len(holes_t_all) < n_tubes:
-                    holes_t_all = [_pick_hole(all_hole_dirs.get(t, []), -dirn) for _ in range(n_tubes)]
+                free_holes_s = [h for i, h in enumerate(holes_s_all) if i not in used_holes.get(s, [])]
+                free_holes_t = [h for i, h in enumerate(holes_t_all) if i not in used_holes.get(t, [])]
+                
+                if len(free_holes_s) < n_tubes or len(free_holes_t) < n_tubes:
+                    print(f"[WARNING] Not enough free holes for double bond {s}-{t}!")
+                    n_tubes = min(len(free_holes_s), len(free_holes_t), n_tubes)
+                
+                if n_tubes == 0:
+                    continue
+                
+                # Scegli i migliori n_tubes fori
+                holes_s_sorted = sorted(free_holes_s, key=lambda h: h.dot(dirn), reverse=True)[:n_tubes]
+                holes_t_sorted = sorted(free_holes_t, key=lambda h: h.dot(-dirn), reverse=True)[:n_tubes]
+                
+                # MARCA COME USATI
+                for h in holes_s_sorted:
+                    idx_h = holes_s_all.index(h)
+                    used_holes[s].append(idx_h)
+                                for h in holes_t_sorted:
+                    idx_h = holes_t_all.index(h)
+                    used_holes[t].append(idx_h)
                 
                 # Distanza tra superfici
                 eff_dist = dist - radius_s - radius_t
                 tlen = eff_dist * tf
                 
                 for tube_i in range(n_tubes):
-                    h_s = holes_s_all[tube_i].normalized()
-                    h_t = holes_t_all[tube_i].normalized()
+                    h_s = holes_s_sorted[tube_i].normalized()
+                    h_t = holes_t_sorted[tube_i].normalized()
                     
-                    # Partenza dalla SUPERFICIE del FORO
+                    # Partenza dalla superficie del foro
                     p0 = pos_s + h_s * radius_s
                     p3 = pos_t + h_t * radius_t
                     
@@ -376,24 +416,22 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             H_added = 0
             
             for parent_idx, n_H in missing_H.items():
-                free_holes = [h for h in all_hole_dirs.get(parent_idx, []) 
-                             if h not in []]  # TODO: traccia fori già usati
+                holes_all = all_hole_dirs.get(parent_idx, [])
+                
+                # Fori LIBERI (non usati da legami)
+                free_holes = [h for i, h in enumerate(holes_all) 
+                             if i not in used_holes.get(parent_idx, [])]
                 
                 parent_pos = coords[parent_idx]
                 parent_radius = atom_radii.get(parent_idx, 0.5)
                 
-                for i in range(min(n_H, len(free_holes) if free_holes else n_H)):
+                if not free_holes:
+                    print(f"[WARNING] No free holes for H on atom {parent_idx}!")
+                    continue
+                
+                for i in range(min(n_H, len(free_holes))):
                     max_idx += 1
-                    
-                    # Direzione H (usa foro libero o stima)
-                    if i < len(free_holes):
-                        h_dir = free_holes[i].normalized()
-                    else:
-                        # Fallback: direzione opposta ai neighbor
-                        neighs = [coords[t] - parent_pos for s, t in bonds if s == parent_idx] + \
-                                [coords[s] - parent_pos for s, t in bonds if t == parent_idx]
-                        avg_dir = sum(neighs, Vector((0,0,0))).normalized() if neighs else Vector((0,0,1))
-                        h_dir = (-avg_dir).normalized()
+                    h_dir = free_holes[i].normalized()
                     
                     # Posizione H (distanza C-H standard 1.09 Å)
                     H_pos = parent_pos + h_dir * 1.09 * P.scale
@@ -407,17 +445,40 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                         h_obj = context.object
                         h_obj.name = f"mol_H_{max_idx}"
                         
-                        # Duplica se necessario
-                        bpy.ops.object.duplicates_make_real()
+                        # Orienta H verso il parent
+                        h_forward = axis_vec(P.H_forward_axis)
+                        h_dir_to_parent = (parent_pos - H_pos).normalized()
+                        q_align = h_forward.rotation_difference(h_dir_to_parent)
+                        h_obj.rotation_euler = q_align.to_euler()
                         
-                        # Legame dritto H (parte dalla superficie!)
+                        # Duplica mesh reale
+                        bpy.ops.object.select_all(action='DESELECT')
+                        h_obj.select_set(True)
+                        bpy.context.view_layer.objects.active = h_obj
+                        bpy.ops.object.duplicates_make_real(
+                            use_hierarchy=True,
+                            use_base_parent=False,
+                            use_keep_transform=True,
+                        )
+                        new_h_objs = [o for o in bpy.context.selected_objects if o != h_obj]
+                        if new_h_objs:
+                            for o in new_h_objs:
+                                o.select_set(False)
+                            bpy.data.objects.remove(h_obj, do_unlink=True)
+                        
+                        # Legame dritto H - parte dalla superficie del parent
                         p0_parent = parent_pos + h_dir * parent_radius
-                        p3_H = H_pos  # H è piccolo, parte dal centro va bene
+                        p3_H = H_pos
                         
                         _create_straight_cylinder(
                             p0_parent, p3_H, bond_r * 0.7, 
                             f"bond_{parent_idx}_{max_idx}", context
                         )
+                        
+                        # Marca foro come usato
+                        if i < len(holes_all):
+                            idx_hole = holes_all.index(free_holes[i])
+                            used_holes[parent_idx].append(idx_hole)
                         
                         H_added += 1
                         
@@ -425,6 +486,14 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                         print(f"[WARNING] Failed to add H to atom {parent_idx}: {e}")
             
             print(f"[OK] Added {H_added} hydrogens")
+
+        # ============ DEBUG: VERIFICA FORI USATI ============
+        if P.debug_mode:
+            print("\n[DEBUG] Hole usage summary:")
+            for idx, used in used_holes.items():
+                sym = types.get(idx, '?')
+                total = len(all_hole_dirs.get(idx, []))
+                print(f"  Atom {idx} ({sym}): {len(used)}/{total} holes used")
 
         self.report({'INFO'}, f"Molymod build complete: {len(placed)} atoms, {bonds_drawn} bonds")
         return {'FINISHED'}
