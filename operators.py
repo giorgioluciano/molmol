@@ -377,7 +377,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 for h in holes_s_sorted:
                     idx_h = holes_s_all.index(h)
                     used_holes[s].append(idx_h)
-                                for h in holes_t_sorted:
+                for h in holes_t_sorted:
                     idx_h = holes_t_all.index(h)
                     used_holes[t].append(idx_h)
                 
