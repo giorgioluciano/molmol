@@ -1,7 +1,7 @@
 import bpy, os, itertools
 from mathutils import Vector, Matrix, Quaternion
 from math import radians
-from collections import defaultdict, deque
+from collections import defaultdict
 
 try:
     from ase.io import read as ase_read
@@ -28,17 +28,31 @@ except ImportError:
 GEN_COLLECTIONS = ["Atom_sp3", "Atom_sp2", "Atom_sp", "Atom_bent", "Atom_sp3d2"]
 HALOGENS = {"F", "Cl", "Br", "I"}
 
-# Valenze minime per elementi (numero fori minimi necessari)
+# Valenze standard per elementi
 MIN_VALENCE = {
-    'C': 4,  # tetravalente
-    'N': 3,  # trivalente
-    'O': 2,  # bivalente
-    'S': 2,
-    'P': 3,
-    'H': 1,
+    'C': 4,  'N': 3,  'O': 2,  'S': 2,  'P': 3,
+    'H': 1,  'F': 1,  'Cl': 1, 'Br': 1, 'I': 1,
 }
 
-# Thresholds for bond order estimation based on inter-atomic distances (Angstrom)
+# Ibridazioni VALIDE per elemento (C NON può fare sp3d2!)
+VALID_HYBRIDIZATIONS = {
+    'C': ['sp', 'sp2', 'sp3'],
+    'N': ['sp', 'sp2', 'sp3'],
+    'O': ['sp2', 'sp3', 'bent'],
+    'S': ['sp2', 'sp3', 'sp3d2'],
+    'P': ['sp2', 'sp3', 'sp3d2'],
+    'H': ['sp'],
+    'F': ['sp3'], 'Cl': ['sp3'], 'Br': ['sp3'], 'I': ['sp3'],
+}
+
+# Raggi atomici van der Waals (Å)
+ATOM_VDW_RADII = {
+    'H': 1.20, 'C': 1.70, 'N': 1.55, 'O': 1.52, 
+    'F': 1.47, 'S': 1.80, 'Cl': 1.75, 'P': 1.80,
+    'Br': 1.85, 'I': 1.98,
+}
+
+# Thresholds for bond order estimation
 BOND_ORDER_THRESHOLDS = {
     ('C', 'C'): [(1.60, 1), (1.42, 1.5), (1.34, 2), (1.20, 3)],
     ('C', 'N'): [(1.50, 1), (1.35, 1.5), (1.28, 2), (1.16, 3)],
@@ -118,12 +132,10 @@ def load_hole_dirs(lib_path, coll_key):
         ob = append_object(lib_path, h)
         if ob.location.length > 1e-9:
             holes.append(ob.location.normalized())
-    if bpy.context.scene and bpy.context.scene.molymod_settings.debug_mode:
-        print(f"[HOLES] {coll_key}: found {len(holes)} hole vectors")
     return holes
 
 def kabsch_rotation(from_vecs, to_vecs):
-    """Calculate optimal rotation matrix (Kabsch algorithm) to align from_vecs to to_vecs."""
+    """Calculate optimal rotation matrix (Kabsch algorithm)."""
     import numpy as np
     A = np.array([[v.x, v.y, v.z] for v in from_vecs], dtype=float).T
     B = np.array([[v.x, v.y, v.z] for v in to_vecs], dtype=float).T
@@ -144,7 +156,7 @@ def align_one_vector(src: Vector, dst: Vector):
     return q.to_matrix().to_4x4()
 
 def hungarian_assign(cost):
-    """Optimal assignment (Hungarian method) for hole-to-bond vector matching."""
+    """Optimal assignment (Hungarian method)."""
     try:
         import numpy as np
         import scipy.optimize as spopt
@@ -182,11 +194,7 @@ def _guess_bond_order(sym1, sym2, distance):
     return 1
 
 def _parse_bond_orders_rdkit(path, atom_index_offset=1):
-    """
-    Read bond orders from SDF/MOL/MOL2/SMILES using RDKit.
-    Returns dict {(i1, i2): order} with 1-based indices.
-    order values: 1=single, 2=double, 3=triple, 1.5=aromatic
-    """
+    """Read bond orders from SDF/MOL/MOL2/SMILES using RDKit."""
     ext = os.path.splitext(path)[1].lower()
     mol = None
     try:
@@ -204,35 +212,30 @@ def _parse_bond_orders_rdkit(path, atom_index_offset=1):
                 mol = Chem.AddHs(mol)
                 AllChem.EmbedMolecule(mol, AllChem.ETKDG())
     except Exception as e:
-        print(f"[Molymod] RDKit failed to read {path}: {e}")
+        print(f"[Molymod] RDKit failed: {e}")
         return {}
 
     if mol is None:
-        print(f"[Molymod] RDKit: could not parse {path}")
         return {}
 
     bond_orders = {}
     RDKIT_ORDER = {
-        Chem.rdchem.BondType.SINGLE:    1,
-        Chem.rdchem.BondType.DOUBLE:    2,
-        Chem.rdchem.BondType.TRIPLE:    3,
-        Chem.rdchem.BondType.AROMATIC:  1.5,
+        Chem.rdchem.BondType.SINGLE: 1,
+        Chem.rdchem.BondType.DOUBLE: 2,
+        Chem.rdchem.BondType.TRIPLE: 3,
+        Chem.rdchem.BondType.AROMATIC: 1.5,
     }
     for bond in mol.GetBonds():
         i1 = bond.GetBeginAtomIdx() + atom_index_offset
-        i2 = bond.GetEndAtomIdx()   + atom_index_offset
+        i2 = bond.GetEndAtomIdx() + atom_index_offset
         order = RDKIT_ORDER.get(bond.GetBondType(), 1)
         bond_orders[(min(i1,i2), max(i1,i2))] = order
 
-    print(f"[Molymod] RDKit: read {len(bond_orders)} bond orders from {os.path.basename(path)}")
+    print(f"[OK] RDKit: {len(bond_orders)} bond orders")
     return bond_orders
 
 def find_rings(bonds, max_size=20):
-    """
-    Trova tutti gli anelli semplici nella molecola usando DFS.
-    Returns: list of rings, each ring is a list of atom indices
-    """
-    # Build adjacency graph
+    """Find all simple rings in the molecule using DFS."""
     graph = defaultdict(list)
     for s, t in bonds:
         graph[s].append(t)
@@ -242,29 +245,22 @@ def find_rings(bonds, max_size=20):
     visited_edges = set()
     
     def dfs_ring(start, current, parent, path):
-        """DFS per trovare cicli"""
         if len(path) > max_size:
             return
-        
         for neighbor in graph[current]:
             if neighbor == parent:
                 continue
-            
             edge = (min(current, neighbor), max(current, neighbor))
             if edge in visited_edges:
                 continue
-            
             if neighbor == start and len(path) >= 3:
-                # Trovato un ciclo
                 rings.append(list(path))
                 return
-            
             if neighbor not in path:
                 path.append(neighbor)
                 dfs_ring(start, neighbor, current, path)
                 path.pop()
     
-    # Prova a partire da ogni nodo
     all_nodes = set()
     for s, t in bonds:
         all_nodes.add(s)
@@ -273,21 +269,18 @@ def find_rings(bonds, max_size=20):
     for node in sorted(all_nodes):
         dfs_ring(node, node, None, [node])
     
-    # Rimuovi duplicati (stesso anello in ordine diverso)
+    # Remove duplicates
     unique_rings = []
     seen = set()
     for ring in rings:
-        # Normalizza: parti dal minimo e ruota
         min_idx = ring.index(min(ring))
         normalized = tuple(ring[min_idx:] + ring[:min_idx])
-        # Considera anche l'ordine inverso
         normalized_rev = tuple(reversed(normalized))
         canonical = min(normalized, normalized_rev)
         if canonical not in seen:
             seen.add(canonical)
             unique_rings.append(list(canonical))
     
-    print(f"[Molymod] Found {len(unique_rings)} rings")
     return unique_rings
 
 def is_aromatic_ring(ring, bond_orders):
@@ -296,12 +289,12 @@ def is_aromatic_ring(ring, bond_orders):
         s = ring[i]
         t = ring[(i+1) % len(ring)]
         order = bond_orders.get((min(s,t), max(s,t)), 1)
-        if abs(order - 1.5) > 0.2:  # tolleranza
+        if abs(order - 1.5) > 0.2:
             return False
     return True
 
 def find_fusion_bonds(rings):
-    """Trova legami condivisi tra anelli (fusione)"""
+    """Find bonds shared between rings (fusion bonds)"""
     bond_count = defaultdict(int)
     for ring in rings:
         for i in range(len(ring)):
@@ -309,33 +302,21 @@ def find_fusion_bonds(rings):
             t = ring[(i+1) % len(ring)]
             bond_count[(min(s,t), max(s,t))] += 1
     
-    # Legami con count > 1 sono fusioni
     fusion = {bond for bond, count in bond_count.items() if count > 1}
-    if fusion:
-        print(f"[Molymod] Found {len(fusion)} fusion bonds: {fusion}")
     return fusion
 
 def kekulize_rings(rings, bond_orders):
-    """
-    Converte anelli aromatici (order=1.5) in pattern alternato Kekulé (1,2,1,2...)
-    Gestisce anche anelli fusi (naftalene, indolo, etc)
-    """
+    """Convert aromatic rings (order=1.5) to alternating Kekulé pattern (1,2,1,2...)"""
     aromatic_rings = [r for r in rings if is_aromatic_ring(r, bond_orders)]
     if not aromatic_rings:
         return
     
-    print(f"[Molymod] Kekulizing {len(aromatic_rings)} aromatic rings")
-    
-    # Trova legami di fusione
+    print(f"[INFO] Kekulizing {len(aromatic_rings)} aromatic rings")
     fusion_bonds = find_fusion_bonds(aromatic_rings)
-    
-    # Processa anelli dal più grande al più piccolo
     aromatic_rings.sort(key=len, reverse=True)
-    
     processed_bonds = set()
     
     for ring in aromatic_rings:
-        # Trova punto di partenza: preferibilmente dopo un legame di fusione già assegnato
         start_idx = 0
         fusion_found = False
         
@@ -345,12 +326,10 @@ def kekulize_rings(rings, bond_orders):
             key = (min(s,t), max(s,t))
             
             if key in fusion_bonds and key in processed_bonds:
-                # Parti da dopo questo legame di fusione
                 start_idx = (i + 1) % len(ring)
                 fusion_found = True
                 break
         
-        # Alterna ordini partendo da start_idx
         for j in range(len(ring)):
             i = (start_idx + j) % len(ring)
             s = ring[i]
@@ -358,11 +337,8 @@ def kekulize_rings(rings, bond_orders):
             key = (min(s,t), max(s,t))
             
             if key in processed_bonds:
-                # Legame già assegnato da anello precedente
                 continue
             
-            # Pattern alternato: pari=1, dispari=2
-            # Ma se è un legame di fusione e non è il primo, forza singolo
             if key in fusion_bonds and not fusion_found:
                 new_order = 1
             else:
@@ -371,26 +347,13 @@ def kekulize_rings(rings, bond_orders):
             bond_orders[key] = new_order
             processed_bonds.add(key)
     
-    print(f"[Molymod] Kekulization complete: {len(processed_bonds)} bonds alternated")
+    print(f"[OK] Kekulization: {len(processed_bonds)} bonds alternated")
 
 def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
-    """
-    Assegna i fori dell'atomo ai neighbor tenendo conto degli ordini di legame.
-    
-    Per un legame doppio verso neighbor N, riserva 2 fori (quelli più allineati
-    con la direzione verso N). Per legame singolo, 1 foro.
-    
-    Parametri:
-      hole_vecs_world: lista di Vector (fori dell'atomo in world-space, già ruotati)
-      neighbors_dirs:  lista di (neighbor_idx, direction_Vector, bond_order)
-      
-    Ritorna:
-      dict {neighbor_idx: [hole_vec, ...]}  (lista di fori assegnati a ciascun neighbor)
-    """
-    # Espandi i neighbor in "slot" in base all'ordine di legame
-    slots = []  # (neighbor_idx, dir)
+    """Assign holes to neighbors considering bond orders."""
+    slots = []
     for n_idx, dirn, order in neighbors_dirs:
-        n_slots = round(order)  # 1→1, 2→2, 3→3
+        n_slots = round(order)
         for k in range(n_slots):
             slots.append((n_idx, dirn))
 
@@ -398,17 +361,15 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
         return {}
 
     n_holes = len(hole_vecs_world)
-    n_slots  = len(slots)
+    n_slots = len(slots)
     use = min(n_holes, n_slots)
 
-    # Matrice costo: 1 - dot(hole, dir) per ogni (hole, slot)
     cost = [
         [1.0 - max(-1.0, min(1.0, hole_vecs_world[h].dot(slots[s][1])))
          for s in range(use)]
         for h in range(n_holes)
     ]
     
-    # Hungarian
     try:
         import numpy as np
         import scipy.optimize as spopt
@@ -417,7 +378,6 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
         row_ind = list(range(use))
         col_ind = list(range(use))
 
-    # Raggruppa i fori assegnati per neighbor
     result = {}
     for r, c in zip(row_ind, col_ind):
         if c >= len(slots): continue
@@ -428,32 +388,57 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
 
     return result
 
-def parse_atoms_bonds(path, scale):
-    """Parse atoms, bonds, and bond orders from molecular file using ASE + RDKit.
+def detect_2d_coords(coords):
+    """Detect if all atoms have Z=0 (2D file)"""
+    all_z_zero = all(abs(pos.z) < 0.001 for pos in coords.values())
+    if all_z_zero:
+        print("[WARNING] 2D coordinates detected (Z=0). Molecule will be flat.")
+        print("[SUGGESTION] Use OpenBabel: obabel file.mol -O out.sdf --gen3d")
+        return True
+    return False
+
+def detect_missing_hydrogens(atoms_list, bonds, bond_orders, types):
+    """Calculate missing hydrogens for each atom."""
+    missing_H = {}
+    for idx, sym, pos in atoms_list:
+        if sym == 'H':
+            continue
+        
+        neighs = [t for s, t in bonds if s == idx] + [s for s, t in bonds if t == idx]
+        bonds_used = sum(round(bond_orders.get((min(idx, n), max(idx, n)), 1)) for n in neighs)
+        
+        valence = MIN_VALENCE.get(sym, 4)
+        n_H_needed = valence - bonds_used
+        
+        if n_H_needed > 0:
+            missing_H[idx] = n_H_needed
+            print(f"[WARNING] Atom {idx} ({sym}) missing {n_H_needed} hydrogens")
     
-    Pipeline:
-    1. Open file (PDB/XYZ/CIF/SDF/MOL)
-    2. Extract atoms + coordinates
-    3. Extract bonds (CONECT if available, else NeighborList)
-    4. Extract bond orders (RDKit if available, CONECT multiplicity, else heuristic)
-    5. Kekulize aromatic rings (convert 1.5 → alternating 1,2,1,2...)
-    6. Return: atoms_list, bonds, coords, types, bond_orders
+    return missing_H
+
+def parse_atoms_bonds(path, scale):
+    """
+    Parse atoms, bonds, and bond orders with full validation.
+    Returns: atoms_list, bonds, coords, types, bond_orders
     """
     ext = os.path.splitext(path)[1].lower()
+    print(f"\n{'='*50}")
+    print(f"PARSING: {os.path.basename(path)}")
+    print(f"{'='*50}")
 
-    # STEP 1: Open file
+    # STEP 1: Load file
     try:
         if ext == ".cif":
             molecule = ase_read(path, format="cif")
         else:
             molecule = ase_read(path)
-    except StopIteration:
-        raise ValueError(f"File {path} contains no readable structures or is empty")
     except Exception as e:
-        raise ValueError(f"Failed to read {path}: {e}")
+        print(f"[ERROR] Cannot read file: {e}")
+        return None
 
     if len(molecule) == 0:
-        raise ValueError(f"File {path} contains no atoms")
+        print(f"[ERROR] File contains no atoms")
+        return None
 
     # STEP 2: Extract atoms
     atoms_list = []
@@ -466,12 +451,14 @@ def parse_atoms_bonds(path, scale):
         atoms_list.append((idx, sym, pos))
         coords[idx] = pos
         types[idx] = sym
-    print(f"[Parse] Found {len(atoms_list)} atoms in {os.path.basename(path)}")
+    print(f"[OK] Found {len(atoms_list)} atoms")
 
-    # STEP 3: Extract bonds
+    # STEP 3: Check 2D vs 3D
+    is_2d = detect_2d_coords(coords)
+
+    # STEP 4: Extract bonds
     bonds = []
     if ext in (".pdb", ".ent"):
-        # PDB: use CONECT records
         bond_set = set()
         try:
             with open(path, "r") as f:
@@ -486,27 +473,25 @@ def parse_atoms_bonds(path, scale):
                             pair = (min(origin, t), max(origin, t))
                             bond_set.add(pair)
             bonds = list(bond_set)
-            print(f"[Parse] Found {len(bonds)} bonds from CONECT records")
+            print(f"[OK] Found {len(bonds)} bonds from CONECT")
         except Exception as e:
-            print(f"[Parse] WARNING: Could not read CONECT records: {e}")
+            print(f"[WARNING] Could not read CONECT: {e}")
 
     if not bonds and ASE_AVAILABLE:
-        # Fallback: use ASE NeighborList
+        print("[INFO] Computing bonds from distances...")
         for (i1, i2) in get_bonds(molecule):
-            if i1 < i2:
-                bonds.append((i1 + 1, i2 + 1))
-            else:
-                bonds.append((i2 + 1, i1 + 1))
-        print(f"[Parse] Computed {len(bonds)} bonds from NeighborList")
+            bonds.append((i1 + 1, i2 + 1) if i1 < i2 else (i2 + 1, i1 + 1))
+        print(f"[OK] Computed {len(bonds)} bonds")
+    elif not bonds:
+        print("[ERROR] No bonds and ASE unavailable!")
+        return None
 
-    # STEP 4: Extract/estimate bond orders
+    # STEP 5: Extract/estimate bond orders
     bond_orders = {}
-
-    # Tentativo 1: RDKit (preciso)
-    if RDKIT_AVAILABLE and ext in (".sdf", ".mol", ".mol2", ".smi", ".smiles"):
-        bond_orders = _parse_bond_orders_rdkit(path, atom_index_offset=1)
-
-    # Tentativo 2: PDB CONECT multiplicity
+    
+    if RDKIT_AVAILABLE and ext in (".sdf", ".mol", ".mol2", ".smi"):
+        bond_orders = _parse_bond_orders_rdkit(path)
+    
     if not bond_orders and ext in (".pdb", ".ent"):
         raw_conect = {}
         try:
@@ -522,32 +507,39 @@ def parse_atoms_bonds(path, scale):
                             pair = (min(origin, t), max(origin, t))
                             raw_conect[pair] = raw_conect.get(pair, 0) + 1
             bond_orders = {pair: min(count, 3) for pair, count in raw_conect.items()}
-            print(f"[Parse] Read {len(bond_orders)} bond orders from CONECT multiplicity")
-        except Exception as e:
-            print(f"[Parse] WARNING: Could not read CONECT bond orders: {e}")
-
-    # Tentativo 3: Euristica dalla distanza
+            print(f"[OK] Read {len(bond_orders)} bond orders from CONECT")
+        except: pass
+    
     if not bond_orders:
+        print("[INFO] Using distance heuristic for bond orders")
         for (i1, i2) in bonds:
-            sym1 = types[i1]
-            sym2 = types[i2]
             dist = (coords[i2] - coords[i1]).length / scale
-            order = _guess_bond_order(sym1, sym2, dist)
-            bond_orders[(min(i1,i2), max(i1,i2))] = order
-        print(f"[Parse] Estimated bond orders heuristically for {len(bond_orders)} bonds")
-    else:
-        # Completa i legami mancanti con ordine 1
-        for (i1, i2) in bonds:
-            k = (min(i1,i2), max(i1,i2))
-            if k not in bond_orders:
-                bond_orders[k] = 1
+            order = _guess_bond_order(types[i1], types[i2], dist)
+            bond_orders[(min(i1, i2), max(i1, i2))] = order
+    
+    for (i1, i2) in bonds:
+        k = (min(i1, i2), max(i1, i2))
+        if k not in bond_orders:
+            bond_orders[k] = 1
+    
+    print(f"[OK] Bond orders: {len(bond_orders)} bonds")
 
-    # STEP 5: KEKULIZE aromatic rings (convert 1.5 → 1,2,1,2...)
+    # STEP 6: Kekulize aromatics
     rings = find_rings(bonds)
     if rings:
+        print(f"[INFO] Found {len(rings)} rings")
         kekulize_rings(rings, bond_orders)
 
-    print(f"[Parse] Final: {len(bond_orders)} bonds with orders")
+    # STEP 7: Summary
+    print(f"\n{'='*50}")
+    print(f"VALIDATION SUMMARY")
+    print(f"{'='*50}")
+    print(f"Atoms: {len(atoms_list)}")
+    print(f"Bonds: {len(bonds)}")
+    print(f"3D coords: {'YES' if not is_2d else 'NO (2D flat)'}")
+    print(f"Rings: {len(rings) if rings else 0}")
+    print(f"{'='*50}\n")
+
     return atoms_list, bonds, coords, types, bond_orders
 
 def axis_vec(label: str) -> Vector:
@@ -558,42 +550,38 @@ def axis_vec(label: str) -> Vector:
     }[label]
 
 def choose_geometry_key(element: str, nn_holes: int):
-    """Choose geometry key based on element and total holes needed.
-    nn_holes = numero totale di fori necessari (non numero di neighbor!)
-    """
+    """Choose geometry based on holes needed, respecting element constraints."""
     if nn_holes <= 1:
-        return "sp"
-    if nn_holes == 2:
-        return "bent" if element in {"O", "S", "Se", "Te"} else "sp"
-    if nn_holes == 3:
-        return "sp2"
-    if nn_holes == 4:
+        candidate = "sp"
+    elif nn_holes == 2:
+        candidate = "bent" if element in {"O", "S", "Se", "Te"} else "sp"
+    elif nn_holes == 3:
+        candidate = "sp2"
+    elif nn_holes == 4:
+        candidate = "sp3"
+    else:
+        candidate = "sp3d2"
+    
+    # Validate for element
+    valid = VALID_HYBRIDIZATIONS.get(element, ['sp3'])
+    if candidate not in valid:
+        print(f"[ERROR] {element} cannot be {candidate}! Using sp3 fallback.")
         return "sp3"
-    if nn_holes >= 5:
-        return "sp3d2"
-    return "sp3"
+    
+    return candidate
 
 def _load_cap_template(P):
     name = (P.cap_template_name or "").strip()
     if not name:
-        if P.debug_mode:
-            print("[CAP] No template name provided -> using built-in cone")
         return None
     try:
         obj = append_object(P.lib_path, name)
-        if P.debug_mode:
-            print(f"[CAP] Loaded OBJECT '{name}'")
         return ("OBJECT", obj)
-    except Exception as e_obj:
-        if P.debug_mode:
-            print(f"[CAP] '{name}' not an OBJECT: {e_obj}")
+    except: pass
     try:
         coll = append_collection(P.lib_path, name)
-        if P.debug_mode:
-            print(f"[CAP] Loaded COLLECTION '{name}'")
         return ("COLLECTION", coll)
-    except Exception as e_col:
-        print(f"[CAP] Template '{name}' not found as Object or Collection: {e_col}")
+    except: pass
     return None
 
 def _get_or_make_material(name, rgba):
@@ -612,10 +600,9 @@ def _get_or_make_cap_material(P):
     if P.cap_mat_name in ["H","C","N","O","S","P","F","Cl","Br","I"]:
         col = getattr(P, f"col_{P.cap_mat_name}", (0.85, 0.85, 0.85, 1.0))
         return _get_or_make_material(f"Mol_{P.cap_mat_name}", col)
-    else:
-        return _get_or_make_material(P.cap_mat_name, (0.85, 0.85, 0.85, 1.0))
+    return _get_or_make_material(P.cap_mat_name, (0.85, 0.85, 0.85, 1.0))
 
-def cap_quaternion(dirn: Vector, forward_axis: str, roll_deg: float) -> Quaternion:
+def cap_quaternion(dirn: Vector, forward_axis: str, roll_deg: float):
     forward_local = axis_vec(forward_axis)
     q_pre = forward_local.rotation_difference(Vector((0,0,1)))
     q_align = Vector((0,0,1)).rotation_difference(dirn.normalized())
@@ -638,8 +625,6 @@ def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
             cap.data.materials.append(cap_mat)
         else:
             cap.data.materials[0] = cap_mat
-        if P.debug_mode:
-            print(f"[CAP] Built-in cone at {tuple(point)}")
         return cap
     
     kind, ref = cap_template
@@ -656,8 +641,6 @@ def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
             cap.data.materials.append(cap_mat)
         else:
             cap.data.materials[0] = cap_mat
-        if P.debug_mode:
-            print(f"[CAP] Duplicated OBJECT '{ref.name}' at {tuple(point)}")
         return cap
     
     if kind == "COLLECTION":
@@ -668,12 +651,8 @@ def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
         inst.location = point
         inst.rotation_euler = q.to_euler()
         inst.scale = (sR, sR, sL)
-        if P.debug_mode:
-            print(f"[CAP] Instanced COLLECTION '{ref.name}' at {tuple(point)}")
         return inst
     
-    print("[CAP] Unknown template kind:", kind)
     return None
 
-# Alias for compatibility
 _axis_vec = axis_vec
