@@ -325,7 +325,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         # Separa singoli e multipli
         single_bonds = [(s,t) for s,t in bonds
                         if bond_orders.get((s,t), bond_orders.get((t,s), 1)) == 1]
-        multiple_bonds = ,t in bonds
+        multiple_bonds = [(s,t) for s,t in bonds
                           if bond_orders.get((s,t), bond_orders.get((t,s), 1)) > 1]
 
         print(f"[INFO] Single bonds: {len(single_bonds)}, Multiple bonds: {len(multiple_bonds)}")
