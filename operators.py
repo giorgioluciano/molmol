@@ -387,22 +387,16 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             if n_tubes == 0:
                 continue
 
-            holes_s_sorted = sorted(free_holes_s,
-                                    key=lambda h: h.dot(dirn),
-                                    reverse=True)[:n_tubes]
-            holes_t_sorted = sorted(free_holes_t,
-                                    key=lambda h: h.dot(-dirn),
-                                    reverse=True)[:n_tubes]
-
-            # ANTI-CROSSING CHECK
-            if n_tubes == 2:
-                h_s0_perp = (holes_s_sorted[0] - holes_s_sorted[0].dot(dirn) * dirn).normalized()
-                h_s1_perp = (holes_s_sorted[1] - holes_s_sorted[1].dot(dirn) * dirn).normalized()
-                h_t0_perp = (holes_t_sorted[0] - holes_t_sorted[0].dot(dirn) * dirn).normalized()
-                h_t1_perp = (holes_t_sorted[1] - holes_t_sorted[1].dot(dirn) * dirn).normalized()
-
-                dot_direct  = h_s0_perp.dot(h_t0_perp) + h_s1_perp.dot(h_t1_perp)
-                dot_crossed = h_s0_perp.dot(h_t1_perp) + h_s1_perp.dot(h_t0_perp)
+            # Selezione fori con garanzia di complanarità
+            from .helpers import find_coplanar_holes
+            
+            holes_s_selected, holes_t_selected = find_coplanar_holes(
+                free_holes_s, free_holes_t, dirn, n_tubes
+            )
+            
+            # Aggiorna sorted per il resto del codice
+            holes_s_sorted = holes_s_selected
+            holes_t_sorted = holes_t_selected
 
                 if dot_crossed > dot_direct:
                     holes_t_sorted = [holes_t_sorted[1], holes_t_sorted[0]]
