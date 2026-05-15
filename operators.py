@@ -398,9 +398,9 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             holes_s_sorted = holes_s_selected
             holes_t_sorted = holes_t_selected
 
-                if dot_crossed > dot_direct:
-                    holes_t_sorted = [holes_t_sorted[1], holes_t_sorted[0]]
-                    print(f"[INFO] Bond {s}-{t}: swapped holes to avoid crossing")
+           if dot_crossed > dot_direct:
+              holes_t_sorted = [holes_t_sorted[1], holes_t_sorted[0]]
+              print(f"[INFO] Bond {s}-{t}: swapped holes to avoid crossing")
 
             # Marca fori usati
             for h in holes_s_sorted:
