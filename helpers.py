@@ -340,7 +340,7 @@ def parse_atoms_bonds(path, scale):
     original_orders = {}
     for bond in mol.GetBonds():
         i1 = bond.GetBeginAtomIdx() + 1
-                i2 = bond.GetEndAtomIdx() + 1
+        i2 = bond.GetEndAtomIdx() + 1
         pair = (min(i1,i2), max(i1,i2))
         original_orders[pair] = bond.GetBondTypeAsDouble()
 
