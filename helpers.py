@@ -325,7 +325,8 @@ def parse_atoms_bonds(path, scale):
         if mol.GetNumConformers() == 0:
             print(MOL_2D_MESSAGE.format(name=name))
             return None
-                    conf = mol.GetConformer()
+        
+        conf = mol.GetConformer()
         positions = conf.GetPositions()
         all_z_zero = all(abs(positions[i][2]) < 0.001 for i in range(len(positions)))
         if all_z_zero:
