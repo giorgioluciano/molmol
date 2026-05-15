@@ -210,9 +210,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             elif len(hole_vecs) >= 1 and len(bond_dirs) >= 1:
                 R = align_one_vector(hole_vecs[0], bond_dirs[0])
 
-            # Applica solo ROTAZIONE
-            inst.rotation_euler = R.to_euler()
-
+            # Calcola R3 per i fori PRIMA di applicare
             R3 = R.to_3x3()
             all_hole_dirs[idx] = [(R3 @ h).normalized() for h in hole_vecs]
 
@@ -229,6 +227,10 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 hole_assignments[idx] = assign_double_bond_holes(
                     all_hole_dirs[idx], neighbors_with_orders
                 )
+
+            # Applica matrix_world COMPLETA (posizione + rotazione)
+            inst.matrix_world = R
+            inst.location = pos  # Riapplica posizione esatta
 
             bpy.ops.object.select_all(action='DESELECT')
             inst.select_set(True)
@@ -255,6 +257,9 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 placed[idx] = new_objs[0]
             else:
                 placed[idx] = inst
+
+            # Forza posizione corretta sull'oggetto finale
+            placed[idx].location = pos
             
             # CALCOLA ATOM RADIUS dalla bounding box
             atom_obj = placed[idx]
