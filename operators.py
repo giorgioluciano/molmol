@@ -318,12 +318,16 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 continue
             
             h_s = max(free_holes_s, key=lambda h: h.dot(dirn))
-            h_t = max(free_holes_t, key=lambda h: h.dot(-dirn))
-            if h_t.dot(-dirn) < 0:
-                h_t = -h_t
+            h_t_orig = max(free_holes_t, key=lambda h: h.dot(-dirn))
+
+            # Salva indici PRIMA di modificare
+            idx_s = holes_s_all.index(h_s)
+            idx_t = holes_t_all.index(h_t_orig)
+            used_holes[s].append(idx_s)
+            used_holes[t].append(idx_t)
             
-            used_holes[s].append(holes_s_all.index(h_s))
-            used_holes[t].append(holes_t_all.index(h_t))
+            # Ora puoi negare se necessario
+            h_t = h_t_orig if h_t_orig.dot(-dirn) >= 0 else -h_t_orig
             
             p0 = pos_s + h_s * radius_s
             p3 = pos_t + h_t * radius_t
