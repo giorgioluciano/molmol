@@ -305,7 +305,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
         print(f"[OK] Placed {len(placed)} atoms")
 
-                # ============ LOOP BOND ============
+        # ============ LOOP BOND ============
         print("\n[BONDS] Drawing bonds...")
         cap_template = None
         cap_mat = None
@@ -600,5 +600,3 @@ class MOLYMOD_OT_ClearAll(bpy.types.Operator):
                 count += 1
         self.report({'INFO'}, f"Removed {count} objects.")
         return {'FINISHED'}
-
-        single_bonds_heavy = 
