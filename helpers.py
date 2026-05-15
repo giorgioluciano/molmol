@@ -260,6 +260,79 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
 
     return result
 
+def find_coplanar_holes(holes_s, holes_t, dirn, n_tubes):
+    """
+    Trova le coppie di fori per legami multipli garantendo complanarità.
+    
+    I 4 fori (2 per atomo) devono giacere sullo stesso piano.
+    Questo simula la geometria sp2 usando atomi sp3.
+    
+    Returns: (holes_s_selected, holes_t_selected)
+    """
+    if len(holes_s) < n_tubes or len(holes_t) < n_tubes:
+        return holes_s[:n_tubes], holes_t[:n_tubes]
+    
+    # STEP 1: Prendi i 2 fori migliori di s verso dirn
+    holes_s_sorted = sorted(holes_s, key=lambda h: h.dot(dirn), reverse=True)
+    h_s1 = holes_s_sorted[0]
+    h_s2 = holes_s_sorted[1] if n_tubes >= 2 else None
+    
+    if n_tubes == 1:
+        # Singolo: solo il miglior foro
+        best_t = max(holes_t, key=lambda h: h.dot(-dirn))
+        return [h_s1], [best_t]
+    
+    # STEP 2: Calcola normale al piano definito da h_s1, h_s2
+    # Usa le componenti perpendicolari a dirn
+    h_s1_perp = (h_s1 - h_s1.dot(dirn) * dirn)
+    h_s2_perp = (h_s2 - h_s2.dot(dirn) * dirn)
+    
+    if h_s1_perp.length < 1e-9 or h_s2_perp.length < 1e-9:
+        # Fallback: usa i 2 migliori di t
+        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
+        return [h_s1, h_s2], holes_t_sorted[:2]
+    
+    # Normale al piano del doppio legame
+    normal = h_s1_perp.cross(h_s2_perp).normalized()
+    
+    # STEP 3: Per t, trova i 2 fori che:
+    # a) Puntano verso s (dot con -dirn > 0)
+    # b) Giacciono sullo stesso piano (componente perp parallela al piano)
+    
+    candidates_t = []
+    for h in holes_t:
+        h_perp = (h - h.dot(-dirn) * (-dirn))
+        # Quanto è vicino al piano? (vuole h_perp · normal ≈ 0)
+        plane_dist = abs(h_perp.dot(normal)) if h_perp.length > 1e-9 else 0
+        dot_with_dir = h.dot(-dirn)
+        candidates_t.append((h, plane_dist, dot_with_dir))
+    
+    # Ordina: prima quelli più vicini al piano, poi per allineamento
+    candidates_t.sort(key=lambda x: (x[1], -x[2]))
+    
+    h_t1 = candidates_t[0][0]
+    h_t2 = candidates_t[1][0] if len(candidates_t) >= 2 else candidates_t[0][0]
+    
+    # STEP 4: Anti-crossing check
+    # Verifica che h_s1↔h_t1 e h_s2↔h_t2 non si incrocino
+    h_s1_perp_n = h_s1_perp.normalized() if h_s1_perp.length > 1e-9 else h_s1_perp
+    h_s2_perp_n = h_s2_perp.normalized() if h_s2_perp.length > 1e-9 else h_s2_perp
+    
+    h_t1_perp = (h_t1 - h_t1.dot(-dirn) * (-dirn))
+    h_t2_perp = (h_t2 - h_t2.dot(-dirn) * (-dirn))
+    h_t1_perp_n = h_t1_perp.normalized() if h_t1_perp.length > 1e-9 else h_t1_perp
+    h_t2_perp_n = h_t2_perp.normalized() if h_t2_perp.length > 1e-9 else h_t2_perp
+    
+    dot_direct  = h_s1_perp_n.dot(h_t1_perp_n) + h_s2_perp_n.dot(h_t2_perp_n)
+    dot_crossed = h_s1_perp_n.dot(h_t2_perp_n) + h_s2_perp_n.dot(h_t1_perp_n)
+    
+    if dot_crossed > dot_direct:
+        h_t1, h_t2 = h_t2, h_t1
+        print(f"[INFO] Anti-crossing: swapped t holes")
+    
+    print(f"[INFO] Coplanar check: normal=({normal.x:.3f},{normal.y:.3f},{normal.z:.3f})")
+    
+    return [h_s1, h_s2], [h_t1, h_t2]
 # ============ VALIDATION ============
 def detect_missing_hydrogens(atoms_list, bonds, bond_orders, types):
     missing_H = {}
