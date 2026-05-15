@@ -320,7 +320,6 @@ def find_coplanar_holes(holes_s, holes_t, dirn, n_tubes):
         print(f"[INFO] Anti-crossing swap applied")
 
     return selected_s, [h_t1, h_t2] 
-]
 
 # ============ GEOMETRY ============
 def choose_geometry_key(element: str, nn_holes: int):
