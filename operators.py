@@ -394,13 +394,10 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 free_holes_s, free_holes_t, dirn, n_tubes
             )
             
-            # Aggiorna sorted per il resto del codice
-            holes_s_sorted = holes_s_selected
-            holes_t_sorted = holes_t_selected
-
-           if dot_crossed > dot_direct:
-              holes_t_sorted = [holes_t_sorted[1], holes_t_sorted[0]]
-              print(f"[INFO] Bond {s}-{t}: swapped holes to avoid crossing")
+            # Selezione fori con garanzia di complanarità
+            holes_s_sorted, holes_t_sorted = find_coplanar_holes(
+                free_holes_s, free_holes_t, dirn, n_tubes
+            )
 
             # Marca fori usati
             for h in holes_s_sorted:
@@ -424,6 +421,11 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 tube_r = bond_r * 0.85
                 _make_bezier_bond(p0, p1, p2, p3, tube_r, tube_name, context)
 
+                if P.use_caps and cap_mat:
+                    _add_cap_at(p0, h_s, P, cap_mat, cap_template)
+                    _add_cap_at(p3, h_t, P, cap_mat, cap_template)
+
+            bonds_drawn += 1            
                 if P.use_caps and cap_mat:
                     _add_cap_at(p0, h_s, P, cap_mat, cap_template)
                     _add_cap_at(p3, h_t, P, cap_mat, cap_template)
