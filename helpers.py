@@ -325,4 +325,159 @@ def parse_atoms_bonds(path, scale):
         if mol.GetNumConformers() == 0:
             print(MOL_2D_MESSAGE.format(name=name))
             return None
-        
+                    conf = mol.GetConformer()
+        positions = conf.GetPositions()
+        all_z_zero = all(abs(positions[i][2]) < 0.001 for i in range(len(positions)))
+        if all_z_zero:
+            print(MOL_2D_MESSAGE.format(name=name))
+            return None
+
+    # ============ SANITIZE + KEKULIZE ============
+    try:
+        Chem.SanitizeMol(mol)
+        Chem.Kekulize(mol, clearAromaticFlags=True)
+        print("[OK] Kekulization successful")
+    except Exception as e:
+        print(f"[WARNING] Kekulization failed: {e}")
+
+    # ============ ESTRAI ATOMI ============
+    atoms_list = []
+    coords = {}
+    types = {}
+
+    conf = mol.GetConformer()
+    for i, atom in enumerate(mol.GetAtoms()):
+        idx = i + 1
+        sym = atom.GetSymbol()
+        p = conf.GetAtomPosition(i)
+        pos = Vector((p.x, p.y, p.z)) * scale
+        atoms_list.append((idx, sym, pos))
+        coords[idx] = pos
+        types[idx] = sym
+
+    print(f"[OK] Found {len(atoms_list)} atoms")
+
+    # ============ ESTRAI BONDS E BOND ORDERS ============
+    bonds = []
+    bond_orders = {}
+
+    RDKIT_ORDER = {
+        Chem.rdchem.BondType.SINGLE:   1,
+        Chem.rdchem.BondType.DOUBLE:   2,
+        Chem.rdchem.BondType.TRIPLE:   3,
+        Chem.rdchem.BondType.AROMATIC: 1.5,
+    }
+
+    for bond in mol.GetBonds():
+        i1 = bond.GetBeginAtomIdx() + 1
+        i2 = bond.GetEndAtomIdx() + 1
+        order = RDKIT_ORDER.get(bond.GetBondType(), 1)
+        pair = (min(i1, i2), max(i1, i2))
+        bonds.append(pair)
+        bond_orders[pair] = order
+
+    print(f"[OK] Found {len(bonds)} bonds")
+
+    # ============ DETECT MISSING H ============
+    missing_H = detect_missing_hydrogens(atoms_list, bonds, bond_orders, types)
+
+    # ============ SUMMARY ============
+    print(f"\n{'='*50}")
+    print(f"VALIDATION SUMMARY")
+    print(f"{'='*50}")
+    print(f"Atoms         : {len(atoms_list)}")
+    print(f"Bonds         : {len(bonds)}")
+    print(f"Bond orders   : {dict(sorted(bond_orders.items()))}")
+    print(f"Missing H     : {sum(missing_H.values()) if missing_H else 0}")
+    print(f"{'='*50}\n")
+
+    return atoms_list, bonds, coords, types, bond_orders
+
+# ============ CAP UTILITIES ============
+def _load_cap_template(P):
+    name = (P.cap_template_name or "").strip()
+    if not name:
+        return None
+    try:
+        obj = append_object(P.lib_path, name)
+        return ("OBJECT", obj)
+    except: pass
+    try:
+        coll = append_collection(P.lib_path, name)
+        return ("COLLECTION", coll)
+    except: pass
+    return None
+
+def _get_or_make_material(name, rgba):
+    mat = bpy.data.materials.get(name)
+    if not mat:
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        nt = mat.node_tree
+        bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if bsdf:
+            bsdf.inputs["Base Color"].default_value = (rgba[0], rgba[1], rgba[2], 1)
+            bsdf.inputs["Roughness"].default_value = 0.45
+    return mat
+
+def _get_or_make_cap_material(P):
+    if P.cap_mat_name in ["H","C","N","O","S","P","F","Cl","Br","I"]:
+        col = getattr(P, f"col_{P.cap_mat_name}", (0.85, 0.85, 0.85, 1.0))
+        return _get_or_make_material(f"Mol_{P.cap_mat_name}", col)
+    return _get_or_make_material(P.cap_mat_name, (0.85, 0.85, 0.85, 1.0))
+
+def cap_quaternion(dirn: Vector, forward_axis: str, roll_deg: float):
+    forward_local = axis_vec(forward_axis)
+    q_pre = forward_local.rotation_difference(Vector((0,0,1)))
+    q_align = Vector((0,0,1)).rotation_difference(dirn.normalized())
+    q_roll = Quaternion(dirn.normalized(), radians(roll_deg))
+    return q_roll @ (q_align @ q_pre)
+
+def _add_cap_at(point, direction, P, cap_mat, cap_template=None):
+    dirn = direction.normalized()
+    sR = P.cap_radius * P.cap_scale
+    sL = P.cap_length * P.cap_scale
+    q = cap_quaternion(dirn, P.cap_forward_axis, P.cap_roll_deg)
+
+    if cap_template is None:
+        bpy.ops.mesh.primitive_cone_add(
+            vertices=24, radius1=sR, radius2=0.0, depth=sL,
+            location=point, rotation=q.to_euler()
+        )
+        cap = bpy.context.object
+        if len(cap.data.materials) == 0:
+            cap.data.materials.append(cap_mat)
+        else:
+            cap.data.materials[0] = cap_mat
+        return cap
+
+    kind, ref = cap_template
+    if kind == "OBJECT":
+        cap = ref.copy()
+        cap.data = ref.data.copy()
+        cap.name = "bond_cap"
+        bpy.context.scene.collection.objects.link(cap)
+        cap.matrix_world = Matrix.Identity(4)
+        cap.location = point
+        cap.rotation_euler = q.to_euler()
+        cap.scale = (sR, sR, sL)
+        if len(cap.data.materials) == 0:
+            cap.data.materials.append(cap_mat)
+        else:
+            cap.data.materials[0] = cap_mat
+        return cap
+
+    if kind == "COLLECTION":
+        bpy.ops.object.collection_instance_add(collection=ref.name, location=(0,0,0))
+        inst = bpy.context.object
+        inst.name = "bond_cap"
+        inst.matrix_world = Matrix.Identity(4)
+        inst.location = point
+        inst.rotation_euler = q.to_euler()
+        inst.scale = (sR, sR, sL)
+        return inst
+
+    return None
+
+# Alias
+_axis_vec = axis_vec
