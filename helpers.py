@@ -262,77 +262,90 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
 
 def find_coplanar_holes(holes_s, holes_t, dirn, n_tubes):
     """
-    Trova le coppie di fori per legami multipli garantendo complanarità.
-    
-    I 4 fori (2 per atomo) devono giacere sullo stesso piano.
-    Questo simula la geometria sp2 usando atomi sp3.
-    
-    Returns: (holes_s_selected, holes_t_selected)
+    Trova coppie di fori complanari per legami multipli.
+    Garantisce che i 4 fori (2+2) giacciano sullo stesso piano.
     """
-    if len(holes_s) < n_tubes or len(holes_t) < n_tubes:
+    if not holes_s or not holes_t:
         return holes_s[:n_tubes], holes_t[:n_tubes]
     
-    # STEP 1: Prendi i 2 fori migliori di s verso dirn
+    # Prendi i migliori n_tubes fori di s
     holes_s_sorted = sorted(holes_s, key=lambda h: h.dot(dirn), reverse=True)
-    h_s1 = holes_s_sorted[0]
-    h_s2 = holes_s_sorted[1] if n_tubes >= 2 else None
+    selected_s = holes_s_sorted[:n_tubes]
     
     if n_tubes == 1:
-        # Singolo: solo il miglior foro
         best_t = max(holes_t, key=lambda h: h.dot(-dirn))
-        return [h_s1], [best_t]
+        return selected_s, [best_t]
     
-    # STEP 2: Calcola normale al piano definito da h_s1, h_s2
-    # Usa le componenti perpendicolari a dirn
-    h_s1_perp = (h_s1 - h_s1.dot(dirn) * dirn)
-    h_s2_perp = (h_s2 - h_s2.dot(dirn) * dirn)
+    # Calcola normale al piano dei fori di s
+    # Usa cross product dei 2 fori selezionati
+    h_s1, h_s2 = selected_s[0], selected_s[1]
+    normal = h_s1.cross(h_s2)
     
-    if h_s1_perp.length < 1e-9 or h_s2_perp.length < 1e-9:
-        # Fallback: usa i 2 migliori di t
+    if normal.length < 1e-9:
+        # Degenere: fallback semplice
         holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
-        return [h_s1, h_s2], holes_t_sorted[:2]
+        return selected_s, holes_t_sorted[:n_tubes]
     
-    # Normale al piano del doppio legame
-    normal = h_s1_perp.cross(h_s2_perp).normalized()
+    normal = normal.normalized()
     
-    # STEP 3: Per t, trova i 2 fori che:
-    # a) Puntano verso s (dot con -dirn > 0)
-    # b) Giacciono sullo stesso piano (componente perp parallela al piano)
+    # Per t: trova i fori il cui piano ha la stessa normale
+    # ovvero: i fori il cui cross product = ±normal
+    # In pratica: minimizza |h_t1.cross(h_t2) - normal|
     
-    candidates_t = []
-    for h in holes_t:
-        h_perp = (h - h.dot(-dirn) * (-dirn))
-        # Quanto è vicino al piano? (vuole h_perp · normal ≈ 0)
-        plane_dist = abs(h_perp.dot(normal)) if h_perp.length > 1e-9 else 0
-        dot_with_dir = h.dot(-dirn)
-        candidates_t.append((h, plane_dist, dot_with_dir))
+    best_pair = None
+    best_score = float('inf')
     
-    # Ordina: prima quelli più vicini al piano, poi per allineamento
-    candidates_t.sort(key=lambda x: (x[1], -x[2]))
+    # Prova tutte le coppie di fori di t
+    for i in range(len(holes_t)):
+        for j in range(i+1, len(holes_t)):
+            h_t1 = holes_t[i]
+            h_t2 = holes_t[j]
+            
+            # Normale del piano di questa coppia
+            n_t = h_t1.cross(h_t2)
+            if n_t.length < 1e-9:
+                continue
+            n_t = n_t.normalized()
+            
+            # Quanto è parallela alla normale di s?
+            # (parallela o antiparallela)
+            parallel = 1.0 - abs(n_t.dot(normal))
+            
+            # Bonus: i fori devono puntare verso s (-dirn)
+            alignment = -(h_t1.dot(-dirn) + h_t2.dot(-dirn))
+            
+            score = parallel + 0.1 * alignment
+            
+            if score < best_score:
+                best_score = score
+                best_pair = (h_t1, h_t2)
     
-    h_t1 = candidates_t[0][0]
-    h_t2 = candidates_t[1][0] if len(candidates_t) >= 2 else candidates_t[0][0]
+    if best_pair is None:
+        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
+        return selected_s, holes_t_sorted[:n_tubes]
     
-    # STEP 4: Anti-crossing check
-    # Verifica che h_s1↔h_t1 e h_s2↔h_t2 non si incrocino
-    h_s1_perp_n = h_s1_perp.normalized() if h_s1_perp.length > 1e-9 else h_s1_perp
-    h_s2_perp_n = h_s2_perp.normalized() if h_s2_perp.length > 1e-9 else h_s2_perp
+    h_t1, h_t2 = best_pair
     
-    h_t1_perp = (h_t1 - h_t1.dot(-dirn) * (-dirn))
-    h_t2_perp = (h_t2 - h_t2.dot(-dirn) * (-dirn))
-    h_t1_perp_n = h_t1_perp.normalized() if h_t1_perp.length > 1e-9 else h_t1_perp
-    h_t2_perp_n = h_t2_perp.normalized() if h_t2_perp.length > 1e-9 else h_t2_perp
+    # Anti-crossing
+    h_s1_perp = (h_s1 - h_s1.dot(dirn) * dirn).normalized() \
+                if (h_s1 - h_s1.dot(dirn) * dirn).length > 1e-9 else h_s1
+    h_s2_perp = (h_s2 - h_s2.dot(dirn) * dirn).normalized() \
+                if (h_s2 - h_s2.dot(dirn) * dirn).length > 1e-9 else h_s2
+    h_t1_perp = (h_t1 - h_t1.dot(dirn) * dirn).normalized() \
+                if (h_t1 - h_t1.dot(dirn) * dirn).length > 1e-9 else h_t1
+    h_t2_perp = (h_t2 - h_t2.dot(dirn) * dirn).normalized() \
+                if (h_t2 - h_t2.dot(dirn) * dirn).length > 1e-9 else h_t2
     
-    dot_direct  = h_s1_perp_n.dot(h_t1_perp_n) + h_s2_perp_n.dot(h_t2_perp_n)
-    dot_crossed = h_s1_perp_n.dot(h_t2_perp_n) + h_s2_perp_n.dot(h_t1_perp_n)
+    dot_direct  = h_s1_perp.dot(h_t1_perp) + h_s2_perp.dot(h_t2_perp)
+    dot_crossed = h_s1_perp.dot(h_t2_perp) + h_s2_perp.dot(h_t1_perp)
     
     if dot_crossed > dot_direct:
         h_t1, h_t2 = h_t2, h_t1
-        print(f"[INFO] Anti-crossing: swapped t holes")
+        print(f"[INFO] Bond: anti-crossing swap applied")
     
-    print(f"[INFO] Coplanar check: normal=({normal.x:.3f},{normal.y:.3f},{normal.z:.3f})")
+    print(f"[INFO] Coplanar score: {best_score:.4f}, normal: ({normal.x:.3f},{normal.y:.3f},{normal.z:.3f})")
     
-    return [h_s1, h_s2], [h_t1, h_t2]
+    return selected_s, [h_t1, h_t2]
 # ============ VALIDATION ============
 def detect_missing_hydrogens(atoms_list, bonds, bond_orders, types):
     missing_H = {}
