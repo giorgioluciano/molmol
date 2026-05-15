@@ -52,8 +52,8 @@ class MOLYMOD_PG_Settings(bpy.types.PropertyGroup):
     use_caps: bpy.props.BoolProperty(name="Add Caps on Bonds", default=False)
     cap_template_name: bpy.props.StringProperty(name="Cap Template", default="")
     cap_scale: bpy.props.FloatProperty(name="Cap Scale", default=1.0, min=0.01, soft_max=10.0)
-    cap_radius: bpy.props.FloatProperty(name="Base Radius", default=0.06, min=0.001, soft_max=1.0)
-    cap_length: bpy.props.FloatProperty(name="Base Length", default=0.20, min=0.001, soft_max=2.0)
+    cap_radius: bpy.props.FloatProperty(name="Base Radius", default=0.55, min=0.001, soft_max=1.0)
+    cap_length: bpy.props.FloatProperty(name="Base Length", default=0.50, min=0.001, soft_max=2.0)
     cap_roll_deg: bpy.props.FloatProperty(name="Cap Roll (deg)", default=0.0, soft_min=-180.0, soft_max=180.0)
     cap_forward_axis: bpy.props.EnumProperty(
         name="Cap Forward Axis",
