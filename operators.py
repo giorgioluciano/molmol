@@ -9,7 +9,8 @@ from .helpers import (
     kabsch_rotation, align_one_vector, hungarian_assign,
     parse_atoms_bonds, choose_geometry_key, axis_vec,
     _load_cap_template, _get_or_make_cap_material, _add_cap_at,
-    assign_double_bond_holes, detect_missing_hydrogens, ATOM_VDW_RADII,find_coplanar_holes
+    assign_double_bond_holes, detect_missing_hydrogens,
+    ATOM_VDW_RADII, find_coplanar_holes, find_best_roll
 )
 
 def _make_bezier_bond(p0, p1, p2, p3, radius, name, context):
@@ -98,7 +99,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             try:
                 append_collection(P.lib_path, key)
             except Exception as e:
-                print(f"[Molymod] '{key}' not found in library (ok if unused). {e}")
+                print(f"[MolMol] '{key}' not found in library (ok if unused). {e}")
 
         # PARSE FILE
         result = parse_atoms_bonds(molfile, P.scale)
@@ -120,7 +121,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         hole_cache = {}
         placed = {}
         all_hole_dirs = {}
-        hole_assignments = {}
         atom_radii = {}
         used_holes = {}
 
@@ -173,7 +173,9 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                     bond_dirs.append(v.normalized())
 
             try:
-                bpy.ops.object.collection_instance_add(collection=key, location=(0, 0, 0))
+                bpy.ops.object.collection_instance_add(
+                    collection=key, location=(0, 0, 0)
+                )
             except Exception as e:
                 print(f"[ERROR] collection_instance_add failed for '{key}': {e}")
                 continue
@@ -184,51 +186,89 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             # COORDINATE FISSE
             inst.location = pos
 
-            # Calcola rotazione
+            # ============ CALCOLO ROTAZIONE ============
             R = Matrix.Identity(4)
-            if nn == 1 and (sym == "H" or sym in HALOGENS) and len(bond_dirs) == 1:
+
+            # Classifica legami
+            single_neighs = [n for n in neighs
+                             if bond_orders.get((min(idx,n), max(idx,n)), 1) == 1]
+            multiple_neighs = [n for n in neighs
+                               if bond_orders.get((min(idx,n), max(idx,n)), 1) > 1]
+
+            if len(hole_vecs) == 0 or len(bond_dirs) == 0:
+                pass  # Lascia identità
+
+            elif nn == 1 and (sym == "H" or sym in HALOGENS):
+                # H e alogeni: semplice allineamento
                 b = bond_dirs[0]
                 forward_local = axis_vec(P.H_forward_axis)
                 q_align = forward_local.rotation_difference(b)
                 q_roll = Quaternion(b, radians(P.H_roll_deg))
                 R = (q_roll @ q_align).to_matrix().to_4x4()
-            elif len(hole_vecs) >= 2 and len(bond_dirs) >= 2:
-                cost = [[1.0 - max(-1.0, min(1.0, h.dot(b))) for b in bond_dirs]
-                        for h in hole_vecs]
-                rows, cols = hungarian_assign(cost)
-                from_v = [hole_vecs[i] for i in rows]
-                to_v = [bond_dirs[j] for j in cols]
-                R = kabsch_rotation(from_v, to_v)
-            elif len(bond_dirs) == 1 and len(hole_vecs) >= 1:
-                b = bond_dirs[0]
-                h = max(hole_vecs, key=lambda v: v.dot(b))
-                if h.dot(b) < 0.0:
-                    h = -h
-                R = align_one_vector(h, b)
-            elif len(hole_vecs) >= 1 and len(bond_dirs) >= 1:
-                R = align_one_vector(hole_vecs[0], bond_dirs[0])
 
-            # Applica matrice (rotazione + posizione)
+            elif len(multiple_neighs) > 0 and len(single_neighs) > 0:
+                # Atomo con legame singolo E multiplo (es. C nel benzene)
+
+                # STEP 1: Allinea foro migliore al primo legame singolo
+                dir_single = (coords[single_neighs[0]] - pos).normalized()
+                h_best = max(hole_vecs, key=lambda h: h.dot(dir_single))
+                R1 = align_one_vector(h_best, dir_single)
+
+                # STEP 2: Ruota sull'asse del singolo per orientare
+                # i fori rimasti verso il legame multiplo
+                dir_double = (coords[multiple_neighs[0]] - pos).normalized()
+                n_tubes = round(bond_orders.get(
+                    (min(idx, multiple_neighs[0]), max(idx, multiple_neighs[0])), 2
+                ))
+
+                best_angle = find_best_roll(
+                    R1, hole_vecs, h_best, dir_single, dir_double, n_tubes
+                )
+
+                R2 = Quaternion(dir_single, best_angle).to_matrix().to_4x4()
+                R = R2 @ R1
+
+            elif len(multiple_neighs) > 0 and len(single_neighs) == 0:
+                # Solo legami multipli: Kabsch
+                if len(hole_vecs) >= 2 and len(bond_dirs) >= 2:
+                    cost = [[1.0 - max(-1.0, min(1.0, h.dot(b)))
+                             for b in bond_dirs]
+                            for h in hole_vecs]
+                    rows, cols = hungarian_assign(cost)
+                    from_v = [hole_vecs[i] for i in rows]
+                    to_v = [bond_dirs[j] for j in cols]
+                    R = kabsch_rotation(from_v, to_v)
+                elif len(bond_dirs) == 1 and len(hole_vecs) >= 1:
+                    h = max(hole_vecs, key=lambda v: v.dot(bond_dirs[0]))
+                    if h.dot(bond_dirs[0]) < 0.0:
+                        h = -h
+                    R = align_one_vector(h, bond_dirs[0])
+
+            else:
+                # Solo legami singoli: Kabsch classico
+                if len(hole_vecs) >= 2 and len(bond_dirs) >= 2:
+                    cost = [[1.0 - max(-1.0, min(1.0, h.dot(b)))
+                             for b in bond_dirs]
+                            for h in hole_vecs]
+                    rows, cols = hungarian_assign(cost)
+                    from_v = [hole_vecs[i] for i in rows]
+                    to_v = [bond_dirs[j] for j in cols]
+                    R = kabsch_rotation(from_v, to_v)
+                elif len(bond_dirs) == 1 and len(hole_vecs) >= 1:
+                    b = bond_dirs[0]
+                    h = max(hole_vecs, key=lambda v: v.dot(b))
+                    if h.dot(b) < 0.0:
+                        h = -h
+                    R = align_one_vector(h, b)
+                elif len(hole_vecs) >= 1 and len(bond_dirs) >= 1:
+                    R = align_one_vector(hole_vecs[0], bond_dirs[0])
+
+            # Applica rotazione + posizione
             inst.matrix_world = R
             inst.location = pos
 
             R3 = R.to_3x3()
             all_hole_dirs[idx] = [(R3 @ h).normalized() for h in hole_vecs]
-
-            # Assegna fori per legami multipli
-            has_multiple_bonds = any(
-                bond_orders.get((min(idx, n), max(idx, n)), 1) >= 2
-                for n in neighs
-            )
-            if has_multiple_bonds:
-                neighbors_with_orders = [
-                    (n, (coords[n] - pos).normalized(),
-                     bond_orders.get((min(idx,n), max(idx,n)), 1))
-                    for n in neighs if (coords[n] - pos).length > 1e-9
-                ]
-                hole_assignments[idx] = assign_double_bond_holes(
-                    all_hole_dirs[idx], neighbors_with_orders
-                )
 
             bpy.ops.object.select_all(action='DESELECT')
             inst.select_set(True)
@@ -285,7 +325,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         # Separa singoli e multipli
         single_bonds = [(s,t) for s,t in bonds
                         if bond_orders.get((s,t), bond_orders.get((t,s), 1)) == 1]
-        multiple_bonds = [(s,t) for s,t in bonds
+        multiple_bonds = ,t in bonds
                           if bond_orders.get((s,t), bond_orders.get((t,s), 1)) > 1]
 
         print(f"[INFO] Single bonds: {len(single_bonds)}, Multiple bonds: {len(multiple_bonds)}")
@@ -328,14 +368,14 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             used_holes[s].append(idx_s)
             used_holes[t].append(idx_t)
 
-            # Orienta h_t nella direzione giusta
+            # Orienta h_t nella direzione corretta
             h_t = h_t_orig if h_t_orig.dot(-dirn) >= 0 else -h_t_orig
 
             # Partenza dalla superficie
             p0 = pos_s + h_s * radius_s
             p3 = pos_t + h_t * radius_t
 
-            #            # Dritto se fori opposti
+            # Dritto se fori opposti, Bezier altrimenti
             if h_s.dot(h_t) < -0.7:
                 _create_straight_cylinder(p0, p3, bond_r, f"bond_{s}_{t}", context)
             else:
@@ -388,13 +428,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 continue
 
             # Selezione fori con garanzia di complanarità
-            from .helpers import find_coplanar_holes
-            
-            holes_s_selected, holes_t_selected = find_coplanar_holes(
-                free_holes_s, free_holes_t, dirn, n_tubes
-            )
-            
-            # Selezione fori con garanzia di complanarità
             holes_s_sorted, holes_t_sorted = find_coplanar_holes(
                 free_holes_s, free_holes_t, dirn, n_tubes
             )
@@ -421,11 +454,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 tube_r = bond_r * 0.85
                 _make_bezier_bond(p0, p1, p2, p3, tube_r, tube_name, context)
 
-                if P.use_caps and cap_mat:
-                    _add_cap_at(p0, h_s, P, cap_mat, cap_template)
-                    _add_cap_at(p3, h_t, P, cap_mat, cap_template)
-
-            bonds_drawn += 1            
                 if P.use_caps and cap_mat:
                     _add_cap_at(p0, h_s, P, cap_mat, cap_template)
                     _add_cap_at(p3, h_t, P, cap_mat, cap_template)
@@ -506,7 +534,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             print(f"[OK] Added {H_added} hydrogens")
 
-        # ========== DEBUG FORI ==========
+        # ========== DEBUG ==========
         if P.debug_mode:
             print("\n[DEBUG] Hole usage summary:")
             for idx, used in used_holes.items():
@@ -514,7 +542,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 total = len(all_hole_dirs.get(idx, []))
                 print(f"  Atom {idx} ({sym}): {len(used)}/{total} holes used")
 
-        self.report({'INFO'}, f"Molymod build complete: {len(placed)} atoms, {bonds_drawn} bonds")
+        self.report({'INFO'}, f"MolMol build complete: {len(placed)} atoms, {bonds_drawn} bonds")
         return {'FINISHED'}
 
 
