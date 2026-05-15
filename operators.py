@@ -9,7 +9,7 @@ from .helpers import (
     kabsch_rotation, align_one_vector, hungarian_assign,
     parse_atoms_bonds, choose_geometry_key, axis_vec,
     _load_cap_template, _get_or_make_cap_material, _add_cap_at,
-    assign_double_bond_holes, detect_missing_hydrogens, ATOM_VDW_RADII
+    assign_double_bond_holes, detect_missing_hydrogens, ATOM_VDW_RADII,find_coplanar_holes
 )
 
 def _make_bezier_bond(p0, p1, p2, p3, radius, name, context):
