@@ -1,6 +1,6 @@
 import bpy, os, itertools
 from mathutils import Vector, Matrix, Quaternion
-from math import radians
+from math import radians, pi
 from collections import defaultdict
 
 # ============ ASE (fallback minimale) ============
@@ -10,19 +10,19 @@ try:
 except ImportError:
     ase_read = None
     ASE_AVAILABLE = False
-    print("[Molymod] ASE not found.")
+    print("[MolMol] ASE not found.")
 
 # ============ RDKIT (fonte primaria) ============
 try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, rdmolops
     RDKIT_AVAILABLE = True
-    print("[Molymod] RDKit available!")
+    print("[MolMol] RDKit available!")
 except ImportError:
     Chem = None
     AllChem = None
     RDKIT_AVAILABLE = False
-    print("[Molymod] RDKit not found!")
+    print("[MolMol] RDKit not found!")
 
 # ============ COSTANTI ============
 GEN_COLLECTIONS = [
@@ -60,9 +60,9 @@ ATOM_VDW_RADII = {
 SUPPORTED_FORMATS = [".sdf", ".mol", ".mol2", ".smi", ".smiles"]
 
 OPENBABEL_MESSAGE = """
-[ERROR] Format '{ext}' is not supported by Molymod.
+[ERROR] Format '{ext}' is not supported by MolMol.
 
-Molymod requires 3D molecular files with explicit bond information.
+MolMol requires 3D molecular files with explicit bond information.
 Supported formats: SDF (3D), MOL2 (3D), SMILES
 
 Convert your file with OpenBabel:
@@ -79,7 +79,7 @@ Download OpenBabel : https://openbabel.org
 MOL_2D_MESSAGE = """
 [ERROR] File '{name}' has 2D coordinates (Z=0).
 
-Molymod needs 3D coordinates to build physical models.
+MolMol needs 3D coordinates to build physical models.
 
 Convert to 3D with OpenBabel:
   obabel {name} -O out_3d.sdf --gen3d
@@ -94,7 +94,7 @@ def abspath(path):
     return bpy.path.abspath(path)
 
 def ensure_hidden_bucket():
-    name = "_MolymodHiddenObjs"
+    name = "_MolMolHiddenObjs"
     coll = bpy.data.collections.get(name)
     if not coll:
         coll = bpy.data.collections.new(name)
@@ -198,6 +198,130 @@ def axis_vec(label: str) -> Vector:
         'Z+': Vector((0,0,1)), 'Z-': Vector((0,0,-1)),
     }[label]
 
+def find_best_roll(R1, hole_vecs, h_used, axis, dir_target, n_tubes=2):
+    """
+    Trova il miglior angolo di rotazione attorno all'asse del legame singolo
+    per allineare i fori rimanenti verso la direzione del legame doppio.
+    
+    R1         = prima rotazione (allinea h_used a dir_single)
+    hole_vecs  = fori originali in local space
+    h_used     = foro già usato per legame singolo (local space)
+    axis       = asse di rotazione = dir_single (world space)
+    dir_target = direzione del legame doppio (world space)
+    n_tubes    = fori necessari per legame multiplo
+    """
+    R1_3x3 = R1.to_3x3()
+
+    # Fori ruotati con R1
+    rotated_holes = [(R1_3x3 @ h).normalized() for h in hole_vecs]
+
+    # Indice foro usato
+    h_used_world = (R1_3x3 @ h_used).normalized()
+    used_idx = max(range(len(rotated_holes)),
+                   key=lambda i: rotated_holes[i].dot(h_used_world))
+
+    best_angle = 0.0
+    best_score = -float('inf')
+
+    # Campiona 360 angoli
+    n_samples = 360
+    for i in range(n_samples):
+        angle = (2 * pi * i) / n_samples
+
+        q = Quaternion(axis, angle)
+        R_roll = q.to_matrix()
+
+        rolled_holes = [(R_roll @ h).normalized() for h in rotated_holes]
+
+        # Fori liberi (tutti tranne quello usato)
+        free = [(j, h) for j, h in enumerate(rolled_holes) if j != used_idx]
+
+        # Score: somma dot dei migliori n_tubes fori verso dir_target
+        free_sorted = sorted(free, key=lambda x: x[1].dot(dir_target), reverse=True)
+        score = sum(h.dot(dir_target) for _, h in free_sorted[:n_tubes])
+
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+
+    return best_angle
+
+def find_coplanar_holes(holes_s, holes_t, dirn, n_tubes):
+    """
+    Trova coppie di fori complanari per legami multipli.
+    Garantisce che i 4 fori (2+2) giacciano sullo stesso piano.
+    """
+    if not holes_s or not holes_t:
+        return holes_s[:n_tubes], holes_t[:n_tubes]
+
+    # Migliori n_tubes fori di s
+    holes_s_sorted = sorted(holes_s, key=lambda h: h.dot(dirn), reverse=True)
+    selected_s = holes_s_sorted[:n_tubes]
+
+    if n_tubes == 1:
+        best_t = max(holes_t, key=lambda h: h.dot(-dirn))
+        return selected_s, [best_t]
+
+    # Normale al piano dei fori di s
+    h_s1, h_s2 = selected_s[0], selected_s[1]
+    normal = h_s1.cross(h_s2)
+
+    if normal.length < 1e-9:
+        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
+        return selected_s, holes_t_sorted[:n_tubes]
+
+    normal = normal.normalized()
+
+    # Trova coppia di t con piano parallelo a quello di s
+    best_pair = None
+    best_score = float('inf')
+
+    for i in range(len(holes_t)):
+        for j in range(i+1, len(holes_t)):
+            h_t1 = holes_t[i]
+            h_t2 = holes_t[j]
+
+            n_t = h_t1.cross(h_t2)
+            if n_t.length < 1e-9:
+                continue
+            n_t = n_t.normalized()
+
+            # Piano parallelo = normali parallele o antiparallele
+            parallel = 1.0 - abs(n_t.dot(normal))
+            # Bonus allineamento verso -dirn
+            alignment = -(h_t1.dot(-dirn) + h_t2.dot(-dirn))
+            score = parallel + 0.1 * alignment
+
+            if score < best_score:
+                best_score = score
+                best_pair = (h_t1, h_t2)
+
+    if best_pair is None:
+        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
+        return selected_s, holes_t_sorted[:n_tubes]
+
+    h_t1, h_t2 = best_pair
+
+    # Anti-crossing check
+    def perp(h, d):
+        v = h - h.dot(d) * d
+        return v.normalized() if v.length > 1e-9 else h
+
+    h_s1_p = perp(h_s1, dirn)
+    h_s2_p = perp(h_s2, dirn)
+    h_t1_p = perp(h_t1, dirn)
+    h_t2_p = perp(h_t2, dirn)
+
+    dot_direct  = h_s1_p.dot(h_t1_p) + h_s2_p.dot(h_t2_p)
+    dot_crossed = h_s1_p.dot(h_t2_p) + h_s2_p.dot(h_t1_p)
+
+    if dot_crossed > dot_direct:
+        h_t1, h_t2 = h_t2, h_t1
+        print(f"[INFO] Anti-crossing swap applied")
+
+    return selected_s, 
+]
+
 # ============ GEOMETRY ============
 def choose_geometry_key(element: str, nn_holes: int):
     if nn_holes <= 1:
@@ -213,7 +337,6 @@ def choose_geometry_key(element: str, nn_holes: int):
 
     valid = VALID_HYBRIDIZATIONS.get(element, ['sp3'])
     if candidate not in valid:
-        # Trova il più adatto tra quelli validi
         order_pref = ['sp3', 'sp2', 'sp3d2', 'sp', 'bent']
         for fallback in order_pref:
             if fallback in valid:
@@ -260,92 +383,6 @@ def assign_double_bond_holes(hole_vecs_world, neighbors_dirs):
 
     return result
 
-def find_coplanar_holes(holes_s, holes_t, dirn, n_tubes):
-    """
-    Trova coppie di fori complanari per legami multipli.
-    Garantisce che i 4 fori (2+2) giacciano sullo stesso piano.
-    """
-    if not holes_s or not holes_t:
-        return holes_s[:n_tubes], holes_t[:n_tubes]
-    
-    # Prendi i migliori n_tubes fori di s
-    holes_s_sorted = sorted(holes_s, key=lambda h: h.dot(dirn), reverse=True)
-    selected_s = holes_s_sorted[:n_tubes]
-    
-    if n_tubes == 1:
-        best_t = max(holes_t, key=lambda h: h.dot(-dirn))
-        return selected_s, [best_t]
-    
-    # Calcola normale al piano dei fori di s
-    # Usa cross product dei 2 fori selezionati
-    h_s1, h_s2 = selected_s[0], selected_s[1]
-    normal = h_s1.cross(h_s2)
-    
-    if normal.length < 1e-9:
-        # Degenere: fallback semplice
-        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
-        return selected_s, holes_t_sorted[:n_tubes]
-    
-    normal = normal.normalized()
-    
-    # Per t: trova i fori il cui piano ha la stessa normale
-    # ovvero: i fori il cui cross product = ±normal
-    # In pratica: minimizza |h_t1.cross(h_t2) - normal|
-    
-    best_pair = None
-    best_score = float('inf')
-    
-    # Prova tutte le coppie di fori di t
-    for i in range(len(holes_t)):
-        for j in range(i+1, len(holes_t)):
-            h_t1 = holes_t[i]
-            h_t2 = holes_t[j]
-            
-            # Normale del piano di questa coppia
-            n_t = h_t1.cross(h_t2)
-            if n_t.length < 1e-9:
-                continue
-            n_t = n_t.normalized()
-            
-            # Quanto è parallela alla normale di s?
-            # (parallela o antiparallela)
-            parallel = 1.0 - abs(n_t.dot(normal))
-            
-            # Bonus: i fori devono puntare verso s (-dirn)
-            alignment = -(h_t1.dot(-dirn) + h_t2.dot(-dirn))
-            
-            score = parallel + 0.1 * alignment
-            
-            if score < best_score:
-                best_score = score
-                best_pair = (h_t1, h_t2)
-    
-    if best_pair is None:
-        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
-        return selected_s, holes_t_sorted[:n_tubes]
-    
-    h_t1, h_t2 = best_pair
-    
-    # Anti-crossing
-    h_s1_perp = (h_s1 - h_s1.dot(dirn) * dirn).normalized() \
-                if (h_s1 - h_s1.dot(dirn) * dirn).length > 1e-9 else h_s1
-    h_s2_perp = (h_s2 - h_s2.dot(dirn) * dirn).normalized() \
-                if (h_s2 - h_s2.dot(dirn) * dirn).length > 1e-9 else h_s2
-    h_t1_perp = (h_t1 - h_t1.dot(dirn) * dirn).normalized() \
-                if (h_t1 - h_t1.dot(dirn) * dirn).length > 1e-9 else h_t1
-    h_t2_perp = (h_t2 - h_t2.dot(dirn) * dirn).normalized() \
-                if (h_t2 - h_t2.dot(dirn) * dirn).length > 1e-9 else h_t2
-    
-    dot_direct  = h_s1_perp.dot(h_t1_perp) + h_s2_perp.dot(h_t2_perp)
-    dot_crossed = h_s1_perp.dot(h_t2_perp) + h_s2_perp.dot(h_t1_perp)
-    
-    if dot_crossed > dot_direct:
-        h_t1, h_t2 = h_t2, h_t1
-        print(f"[INFO] Bond: anti-crossing swap applied")
-    
-    print(f"[INFO] Coplanar score: {best_score:.4f}, normal: ({normal.x:.3f},{normal.y:.3f},{normal.z:.3f})")
-    
-    return selected_s, [h_t1, h_t2]
 # ============ VALIDATION ============
 def detect_missing_hydrogens(atoms_list, bonds, bond_orders, types):
     missing_H = {}
@@ -455,7 +492,7 @@ def parse_atoms_bonds(path, scale):
 
     print(f"[OK] Found {len(atoms_list)} atoms")
 
-    # ESTRAI BONDS usando ordini ORIGINALI dal file
+    # ESTRAI BONDS usando ordini ORIGINALI
     bonds = []
     bond_orders = {}
 
