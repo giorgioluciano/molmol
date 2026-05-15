@@ -386,6 +386,37 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 continue
 
             holes_s_sorted = sorted(free_holes_s, key=lambda h: h.dot(dirn), reverse=True)[:n_tubes]
+                            # Scegli i migliori n_tubes fori
+                holes_s_sorted = sorted(
+                    free_holes_s, 
+                    key=lambda h: h.dot(dirn), 
+                    reverse=True
+                )[:n_tubes]
+                
+                holes_t_sorted = sorted(
+                    free_holes_t, 
+                    key=lambda h: h.dot(-dirn), 
+                    reverse=True
+                )[:n_tubes]
+                
+                # ANTI-CROSSING CHECK
+                # Verifica che h_s[i] e h_t[i] siano dalla stessa parte
+                # confrontando le componenti perpendicolari all'asse del legame
+                if n_tubes == 2:
+                    # Componenti perpendicolari all'asse
+                    h_s0_perp = holes_s_sorted[0] - holes_s_sorted[0].dot(dirn) * dirn
+                    h_s1_perp = holes_s_sorted[1] - holes_s_sorted[1].dot(dirn) * dirn
+                    h_t0_perp = holes_t_sorted[0] - holes_t_sorted[0].dot(-dirn) * (-dirn)
+                    h_t1_perp = holes_t_sorted[1] - holes_t_sorted[1].dot(-dirn) * (-dirn)
+                    
+                    # Assegnazione diretta vs incrociata
+                    dot_direct  = h_s0_perp.dot(h_t0_perp) + h_s1_perp.dot(h_t1_perp)
+                    dot_crossed = h_s0_perp.dot(h_t1_perp) + h_s1_perp.dot(h_t0_perp)
+                    
+                    # Se incrociata è migliore → swap
+                    if dot_crossed > dot_direct:
+                        holes_t_sorted = [holes_t_sorted[1], holes_t_sorted[0]]
+                        print(f"[INFO] Bond {s}-{t}: swapped holes to avoid crossing")
             holes_t_sorted = sorted(free_holes_t, key=lambda h: h.dot(-dirn), reverse=True)[:n_tubes]
             
             for h in holes_s_sorted:
