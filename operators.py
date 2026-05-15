@@ -466,10 +466,58 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
         for s, t in single_bonds_heavy:
             draw_single_bond(s, t)
 
-        # ========== PASSATA 3: SINGOLI HEAVY-H (sempre per ultimi!) ==========
+        # ========== PASSATA 3: SINGOLI HEAVY-H ==========
         print("[BONDS] Pass 3: Single heavy-H bonds...")
         for s, t in single_bonds_H:
-            draw_single_bond(s, t)
+            # Identifica heavy e H
+            if types.get(s) == 'H':
+                heavy, h_atom = t, s
+            else:
+                heavy, h_atom = s, t
+
+            if heavy not in placed or h_atom not in placed:
+                continue
+
+            pos_heavy = coords[heavy]
+            pos_H = coords[h_atom]
+            vec = pos_H - pos_heavy
+            dist = vec.length
+            if dist <= 1e-9:
+                continue
+
+            dirn = vec.normalized()
+            radius_heavy = atom_radii.get(heavy, 0.5)
+
+            # Usa foro libero del HEAVY verso H
+            holes_heavy_all = all_hole_dirs.get(heavy, [])
+            free_heavy = [h for i,h in enumerate(holes_heavy_all)
+                         if i not in used_holes.get(heavy, [])]
+
+            if not free_heavy:
+                print(f"[WARNING] No free holes for H bond {s}-{t}!")
+                continue
+
+            # Miglior foro libero del heavy verso H
+            h_dir = max(free_heavy, key=lambda h: h.dot(dirn))
+            idx_h = holes_heavy_all.index(h_dir)
+            used_holes[heavy].append(idx_h)
+
+            # Orienta l'atomo H verso il heavy
+            h_obj = placed.get(h_atom)
+            if h_obj:
+                h_forward = axis_vec(P.H_forward_axis)
+                dir_to_heavy = (pos_heavy - pos_H).normalized()
+                q = h_forward.rotation_difference(dir_to_heavy)
+                h_obj.rotation_euler = q.to_euler()
+                h_obj.location = pos_H
+
+            # Legame dritto dal foro del heavy all'H
+            p0 = pos_heavy + h_dir * radius_heavy
+            p3 = pos_H
+            _create_straight_cylinder(
+                p0, p3, bond_r * 0.7, f"bond_{s}_{t}", context
+            )
+            bonds_drawn += 1
 
         print(f"[OK] Drew {bonds_drawn} bonds")
 
