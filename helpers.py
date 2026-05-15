@@ -453,8 +453,79 @@ def parse_atoms_bonds(path, scale):
         types[idx] = sym
     print(f"[OK] Found {len(atoms_list)} atoms")
 
-    # STEP 3: Check 2D vs 3D
-    is_2d = detect_2d_coords(coords)
+    # STEP 3: Extract bonds
+    bonds = []
+    
+    if ext in (".mol", ".sdf"):
+        # Leggi bonds DIRETTAMENTE dal file MOL
+        try:
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            
+            # Trova header MOL: riga con contatori
+            counts_line = None
+            for i, line in enumerate(lines):
+                # La riga counts è dopo le righe di intestazione
+                if i >= 3:
+                    try:
+                        n_atoms = int(line[0:3])
+                        n_bonds = int(line[3:6])
+                        counts_line = i
+                        break
+                    except:
+                        continue
+            
+            if counts_line is not None:
+                # Atom block: counts_line+1 → counts_line+n_atoms
+                # Bond block: counts_line+n_atoms+1 → counts_line+n_atoms+n_bonds
+                bond_start = counts_line + 1 + n_atoms
+                
+                for i in range(n_bonds):
+                    line = lines[bond_start + i]
+                    a1 = int(line[0:3])
+                    a2 = int(line[3:6])
+                    btype = int(line[6:9])
+                    
+                    pair = (min(a1, a2), max(a1, a2))
+                    bonds.append(pair)
+                    
+                    # Mappa bond type MOL → order
+                    # 1=single, 2=double, 3=triple, 4=aromatic
+                    mol_order = {1: 1, 2: 2, 3: 3, 4: 1.5}.get(btype, 1)
+                    bond_orders[pair] = mol_order
+                
+                print(f"[OK] Read {len(bonds)} bonds directly from MOL file")
+        
+        except Exception as e:
+            print(f"[WARNING] Could not read MOL bonds directly: {e}")
+    
+    if ext in (".pdb", ".ent"):
+        bond_set = set()
+        try:
+            with open(path, "r") as f:
+                for line in f:
+                    if line.startswith("CONECT"):
+                        fields = line.split()
+                        if len(fields) < 3:
+                            continue
+                        origin = int(fields[1])
+                        for target in fields[2:]:
+                            t = int(target)
+                            pair = (min(origin, t), max(origin, t))
+                            bond_set.add(pair)
+            bonds = list(bond_set)
+            print(f"[OK] Found {len(bonds)} bonds from CONECT")
+        except Exception as e:
+            print(f"[WARNING] Could not read CONECT: {e}")
+
+    if not bonds and ASE_AVAILABLE:
+        print("[INFO] Computing bonds from distances (fallback)...")
+        for (i1, i2) in get_bonds(molecule):
+            bonds.append((i1 + 1, i2 + 1) if i1 < i2 else (i2 + 1, i1 + 1))
+        print(f"[OK] Computed {len(bonds)} bonds")
+    elif not bonds:
+        print("[ERROR] No bonds and ASE unavailable!")
+        return None
 
     # STEP 4: Extract bonds
     bonds = []
