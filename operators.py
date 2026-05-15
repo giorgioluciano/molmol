@@ -196,7 +196,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                                if bond_orders.get((min(idx,n), max(idx,n)), 1) > 1]
 
             if len(hole_vecs) == 0 or len(bond_dirs) == 0:
-                pass  # Lascia identità
+                pass
 
             elif nn == 1 and (sym == "H" or sym in HALOGENS):
                 # H e alogeni: semplice allineamento
@@ -208,7 +208,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             elif len(multiple_neighs) > 0 and len(single_neighs) > 0:
                 # Atomo con legame singolo E multiplo (es. C nel benzene)
-
                 # STEP 1: Allinea foro migliore al primo legame singolo
                 dir_single = (coords[single_neighs[0]] - pos).normalized()
                 h_best = max(hole_vecs, key=lambda h: h.dot(dir_single))
@@ -295,14 +294,10 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             else:
                 placed[idx] = inst
 
-            # Forza posizione corretta
             placed[idx].location = pos
 
-            # Calcola radius dalla bounding box
             dims = placed[idx].dimensions
             atom_radii[idx] = max(dims) / 2.0 if max(dims) > 0 else 0.5
-
-            # Inizializza tracking fori
             used_holes[idx] = []
 
             if P.debug_mode:
@@ -310,7 +305,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
         print(f"[OK] Placed {len(placed)} atoms")
 
-        # ============ LOOP BOND ============
+                # ============ LOOP BOND ============
         print("\n[BONDS] Drawing bonds...")
         cap_template = None
         cap_mat = None
@@ -318,30 +313,38 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             cap_template = _load_cap_template(P)
             cap_mat = _get_or_make_cap_material(P)
 
-        bond_r = P.bond_radius * P.scale / 3.0
+        bond_r = P.bond_radius * P.scale
         tf = P.bond_tangent_factor
         bonds_drawn = 0
 
-        # Separa singoli e multipli
-        single_bonds = [(s,t) for s,t in bonds
-                        if bond_orders.get((s,t), bond_orders.get((t,s), 1)) == 1]
+        # Dividi bonds in 3 gruppi - ordine fisso
         multiple_bonds = [(s,t) for s,t in bonds
                           if bond_orders.get((s,t), bond_orders.get((t,s), 1)) > 1]
 
-        print(f"[INFO] Single bonds: {len(single_bonds)}, Multiple bonds: {len(multiple_bonds)}")
+        single_bonds_heavy = [(s,t) for s,t in bonds
+                               if bond_orders.get((s,t), bond_orders.get((t,s), 1)) == 1
+                               and types.get(s) != 'H'
+                               and types.get(t) != 'H']
 
-        # ========== PASSATA 1: SINGOLI ==========
-        print("[BONDS] Pass 1: Single bonds...")
-        for s, t in single_bonds:
+        single_bonds_H = [(s,t) for s,t in bonds
+                          if types.get(s) == 'H' or types.get(t) == 'H']
+
+        print(f"[INFO] Multiple: {len(multiple_bonds)}, "
+              f"Heavy-Heavy: {len(single_bonds_heavy)}, "
+              f"Heavy-H: {len(single_bonds_H)}")
+
+        def draw_single_bond(s, t):
+            """Disegna un legame singolo tra s e t."""
+            nonlocal bonds_drawn
             if s not in placed or t not in placed:
-                continue
-
+                return
+            
             pos_s = coords[s]
             pos_t = coords[t]
             vec = pos_t - pos_s
             dist = vec.length
             if dist <= 1e-9:
-                continue
+                return
 
             dirn = vec.normalized()
             radius_s = atom_radii.get(s, 0.5)
@@ -357,7 +360,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             if not free_holes_s or not free_holes_t:
                 print(f"[WARNING] No free holes for single bond {s}-{t}!")
-                continue
+                return
 
             h_s = max(free_holes_s, key=lambda h: h.dot(dirn))
             h_t_orig = max(free_holes_t, key=lambda h: h.dot(-dirn))
@@ -391,8 +394,8 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             bonds_drawn += 1
 
-        # ========== PASSATA 2: MULTIPLI ==========
-        print("[BONDS] Pass 2: Multiple bonds...")
+        # ========== PASSATA 1: MULTIPLI ==========
+        print("[BONDS] Pass 1: Multiple bonds...")
         for s, t in multiple_bonds:
             if s not in placed or t not in placed:
                 continue
@@ -427,12 +430,10 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             if n_tubes == 0:
                 continue
 
-            # Selezione fori con garanzia di complanarità
             holes_s_sorted, holes_t_sorted = find_coplanar_holes(
                 free_holes_s, free_holes_t, dirn, n_tubes
             )
 
-            # Marca fori usati
             for h in holes_s_sorted:
                 used_holes[s].append(holes_s_all.index(h))
             for h in holes_t_sorted:
@@ -460,10 +461,20 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
 
             bonds_drawn += 1
 
+        # ========== PASSATA 2: SINGOLI HEAVY-HEAVY ==========
+        print("[BONDS] Pass 2: Single heavy-heavy bonds...")
+        for s, t in single_bonds_heavy:
+            draw_single_bond(s, t)
+
+        # ========== PASSATA 3: SINGOLI HEAVY-H (sempre per ultimi!) ==========
+        print("[BONDS] Pass 3: Single heavy-H bonds...")
+        for s, t in single_bonds_H:
+            draw_single_bond(s, t)
+
         print(f"[OK] Drew {bonds_drawn} bonds")
 
-        # ========== PASSATA 3: H MANCANTI ==========
-        print("[BONDS] Pass 3: Missing hydrogens...")
+        # ========== PASSATA 4: H MANCANTI ==========
+        print("[BONDS] Pass 4: Missing hydrogens...")
         if missing_H:
             max_idx = max(idx for idx, _, _ in atoms)
             H_added = 0
@@ -497,7 +508,6 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                         h_obj = context.object
                         h_obj.name = f"mol_H_{max_idx}"
 
-                        # Orienta H verso parent
                         h_forward = axis_vec(P.H_forward_axis)
                         h_dir_to_parent = (parent_pos - H_pos).normalized()
                         q_align = h_forward.rotation_difference(h_dir_to_parent)
@@ -517,14 +527,12 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                                 o.select_set(False)
                             bpy.data.objects.remove(h_obj, do_unlink=True)
 
-                        # Legame dritto H
                         p0_parent = parent_pos + h_dir * parent_radius
                         _create_straight_cylinder(
                             p0_parent, H_pos, bond_r * 0.7,
                             f"bond_{parent_idx}_{max_idx}", context
                         )
 
-                        # Marca foro usato
                         idx_hole = holes_all.index(free_holes[i])
                         used_holes[parent_idx].append(idx_hole)
                         H_added += 1
@@ -592,3 +600,5 @@ class MOLYMOD_OT_ClearAll(bpy.types.Operator):
                 count += 1
         self.report({'INFO'}, f"Removed {count} objects.")
         return {'FINISHED'}
+
+        single_bonds_heavy = 
