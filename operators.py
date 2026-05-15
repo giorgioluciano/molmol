@@ -240,7 +240,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 bpy.ops.object.duplicates_make_real(
                     use_hierarchy=True,
                     use_base_parent=False,
-                    use_keep_transform=True,
+                    
                 )
                 new_objs = [o for o in bpy.context.selected_objects if o != inst]
             except Exception as e:
@@ -459,7 +459,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                         bpy.ops.object.duplicates_make_real(
                             use_hierarchy=True,
                             use_base_parent=False,
-                            use_keep_transform=True,
+                           
                         )
                         new_h_objs = [o for o in bpy.context.selected_objects if o != h_obj]
                         if new_h_objs:
