@@ -430,9 +430,19 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
             if n_tubes == 0:
                 continue
 
-            holes_s_sorted, holes_t_sorted = find_coplanar_holes(
-                free_holes_s, free_holes_t, dirn, n_tubes
-            )
+            master_is_s = True
+            if types.get(t) == 'C' and types.get(s) != 'C':
+                master_is_s = False
+            
+            if master_is_s:
+                holes_s_sorted, holes_t_sorted = find_coplanar_holes(
+                    free_holes_s, free_holes_t, dirn, n_tubes
+                )
+            else:
+                ht, hs = find_coplanar_holes(
+                    free_holes_t, free_holes_s, -dirn, n_tubes
+                )
+                holes_s_sorted, holes_t_sorted = hs, ht
 
             for h in holes_s_sorted:
                 used_holes[s].append(holes_s_all.index(h))
