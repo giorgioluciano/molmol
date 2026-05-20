@@ -446,26 +446,7 @@ class MOLYMOD_OT_Build(bpy.types.Operator):
                 h_s = holes_s_sorted[tube_i].normalized()
                 h_t = holes_t_sorted[tube_i].normalized()
                 # ---- NUOVO: forza simmetria rispetto all'asse del legame ----
-                # Calcola il vettore perpendicolare (offset) come media proiettata
-                offset_s = h_s - h_s.dot(dirn) * dirn   # componente perp di h_s
-                offset_t = h_t - h_t.dot(-dirn) * (-dirn)  # componente perp di h_t
-            
-                # Se entrambi hanno una componente perpendicolare significativa,
-                # forza l'offset di h_t ad essere uguale e opposto a quello di h_s
-                if offset_s.length > 1e-4 and offset_t.length > 1e-4:
-                    # Normalizza l'offset di riferimento (dal lato S)
-                    ref_perp = offset_s.normalized()
-                    offset_magnitude_s = offset_s.length
-                    offset_magnitude_t = offset_t.length
-                    avg_magnitude = (offset_magnitude_s + offset_magnitude_t) / 2.0
-            
-                    # Ricostruisci h_s e h_t simmetrici
-                    # Componente assiale (verso il partner)
-                    axial_s = h_s.dot(dirn)
-                    axial_t = h_t.dot(-dirn)
-                    
-                    h_s = (dirn * axial_s + ref_perp * avg_magnitude).normalized()
-                    h_t = ((-dirn) * axial_t + ref_perp * avg_magnitude).normalized()
+                
                 # ---- FINE NUOVO ----
                 
 
