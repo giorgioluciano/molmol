@@ -248,78 +248,113 @@ def find_best_roll(R1, hole_vecs, h_used, axis, dir_target, n_tubes=2):
 
 def find_coplanar_holes(holes_s, holes_t, dirn, n_tubes):
     """
-    Trova coppie di fori complanari per legami multipli.
-    Garantisce che i 4 fori (2+2) giacciano sullo stesso piano.
+    Seleziona i fori per legami multipli evitando crossing e rette sghembe.
+    holes_s = lato master
+    holes_t = lato slave
+    dirn    = asse del legame da s -> t
     """
+
     if not holes_s or not holes_t:
         return holes_s[:n_tubes], holes_t[:n_tubes]
 
-    # Migliori n_tubes fori di s
     holes_s_sorted = sorted(holes_s, key=lambda h: h.dot(dirn), reverse=True)
     selected_s = holes_s_sorted[:n_tubes]
+
+    if len(selected_s) < n_tubes:
+        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
+        return selected_s, holes_t_sorted[:len(selected_s)]
 
     if n_tubes == 1:
         best_t = max(holes_t, key=lambda h: h.dot(-dirn))
         return selected_s, [best_t]
 
-    # Normale al piano dei fori di s
-    h_s1, h_s2 = selected_s[0], selected_s[1]
-    normal = h_s1.cross(h_s2)
+    def perp(h, axis):
+        v = h - h.dot(axis) * axis
+        return v.normalized() if v.length > 1e-9 else None
 
-    if normal.length < 1e-9:
+    def side_score(hs, ht):
+        ps = perp(hs, dirn)
+        pt = perp(ht, dirn)
+        if ps is None or pt is None:
+            return -1.0
+        return ps.dot(pt)
+
+    best_combo = None
+    best_score = -1e18
+
+    for combo in itertools.combinations(holes_t, n_tubes):
+        combo = list(combo)
+
+        # 1) bonus: i fori di t devono guardare verso s
+        align = sum(h.dot(-dirn) for h in combo)
+
+        # 2) pairing score: stesso lato rispetto all'asse
+        pair_score = sum(side_score(selected_s[i], combo[i]) for i in range(n_tubes))
+
+        # 3) penalità: tutti i fori di t sullo stesso lato = male
+        side_penalty = 0.0
+        perps_t = [perp(h, dirn) for h in combo]
+        valid_t = [p for p in perps_t if p is not None]
+        for i in range(len(valid_t)):
+            for j in range(i + 1, len(valid_t)):
+                if valid_t[i].dot(valid_t[j]) > 0.95:
+                    side_penalty += 1.0
+
+        # 4) per doppi legami: preferisci la retta dei due fori di t
+        #    parallela alla retta dei due fori di s (niente sghembo visivo)
+        line_score = 0.0
+        if n_tubes == 2:
+            ds = selected_s[1] - selected_s[0]
+            dt = combo[1] - combo[0]
+            if ds.length > 1e-9 and dt.length > 1e-9:
+                ds.normalize()
+                dt.normalize()
+                line_score = abs(ds.dot(dt))
+
+        score = (
+            2.0 * pair_score +
+            0.5 * align +
+            1.5 * line_score -
+            2.0 * side_penalty
+        )
+
+        if score > best_score:
+            best_score = score
+            best_combo = combo
+
+    if best_combo is None:
         holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
-        return selected_s, holes_t_sorted[:n_tubes]
+        best_combo = holes_t_sorted[:n_tubes]
 
-    normal = normal.normalized()
+    # Anti-crossing finale
+    if n_tubes == 2:
+        h_s1, h_s2 = selected_s
+        h_t1, h_t2 = best_combo
 
-    # Trova coppia di t con piano parallelo a quello di s
-    best_pair = None
-    best_score = float('inf')
+        h_s1_p = perp(h_s1, dirn)
+        h_s2_p = perp(h_s2, dirn)
+        h_t1_p = perp(h_t1, dirn)
+        h_t2_p = perp(h_t2, dirn)
 
-    for i in range(len(holes_t)):
-        for j in range(i+1, len(holes_t)):
-            h_t1 = holes_t[i]
-            h_t2 = holes_t[j]
+        if None not in (h_s1_p, h_s2_p, h_t1_p, h_t2_p):
+            dot_direct  = h_s1_p.dot(h_t1_p) + h_s2_p.dot(h_t2_p)
+            dot_crossed = h_s1_p.dot(h_t2_p) + h_s2_p.dot(h_t1_p)
+            if dot_crossed > dot_direct:
+                best_combo = [h_t2, h_t1]
+                print("[INFO] Anti-crossing swap applied")
 
-            n_t = h_t1.cross(h_t2)
-            if n_t.length < 1e-9:
-                continue
-            n_t = n_t.normalized()
+    elif n_tubes == 3:
+        perms = list(itertools.permutations(best_combo, 3))
 
-            # Piano parallelo = normali parallele o antiparallele
-            parallel = 1.0 - abs(n_t.dot(normal))
-            # Bonus allineamento verso -dirn
-            alignment = -(h_t1.dot(-dirn) + h_t2.dot(-dirn))
-            score = parallel + 0.1 * alignment
+        def perm_score(perm):
+            total = 0.0
+            for i in range(3):
+                total += side_score(selected_s[i], perm[i])
+            return total
 
-            if score < best_score:
-                best_score = score
-                best_pair = (h_t1, h_t2)
+        best_combo = list(max(perms, key=perm_score))
 
-    if best_pair is None:
-        holes_t_sorted = sorted(holes_t, key=lambda h: h.dot(-dirn), reverse=True)
-        return selected_s, holes_t_sorted[:n_tubes]
-
-    h_t1, h_t2 = best_pair
-
-    # Anti-crossing check
-    def perp(h, d):
-        v = h - h.dot(d) * d
-        return v.normalized() if v.length > 1e-9 else h
-
-    h_s1_p = perp(h_s1, dirn)
-    h_s2_p = perp(h_s2, dirn)
-    h_t1_p = perp(h_t1, dirn)
-    h_t2_p = perp(h_t2, dirn)
-
-    dot_direct  = h_s1_p.dot(h_t1_p) + h_s2_p.dot(h_t2_p)
-    dot_crossed = h_s1_p.dot(h_t2_p) + h_s2_p.dot(h_t1_p)
-
-    if dot_crossed > dot_direct:
-        h_t1, h_t2 = h_t2, h_t1
-        print(f"[INFO] Anti-crossing swap applied")
-
-    return selected_s, [h_t1, h_t2] 
+    return selected_s, list(best_combo)
 
 # ============ GEOMETRY ============
 def choose_geometry_key(element: str, nn_holes: int):
